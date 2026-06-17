@@ -616,7 +616,11 @@ export function ChatSidebar(props: {
           </div>
         ) : null}
       </div>
-      {error ? <p className="chat-error">{error.message}</p> : null}
+      {error ? (
+        <p className="chat-error">
+          Couldn't reach the AI assistant. Please try again.
+        </p>
+      ) : null}
       <div className="chat-input-wrap">
         <textarea
           ref={textareaRef}

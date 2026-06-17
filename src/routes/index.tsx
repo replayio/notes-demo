@@ -11,6 +11,7 @@ export const Route = createFileRoute('/')({
 function Home() {
   const navigate = Route.useNavigate()
   const [draftDoc, setDraftDoc] = useState('')
+  const [docError, setDocError] = useState('')
   const { displayName, saveDisplayName } = useStoredDisplayName()
   const [draftName, setDraftName] = useState(displayName)
 
@@ -33,7 +34,10 @@ function Home() {
             onSubmit={(e) => {
               e.preventDefault()
               const next = draftDoc.trim()
-              if (!next) return
+              if (!next) {
+                setDocError('Document name is required')
+                return
+              }
               saveDisplayName(draftName)
               void navigate({
                 to: '/doc/$name',
@@ -67,10 +71,16 @@ function Home() {
                 className="doc-picker-input doc-picker-input--landing"
                 type="text"
                 value={draftDoc}
-                onChange={(e) => setDraftDoc(e.target.value)}
+                onChange={(e) => {
+                  setDraftDoc(e.target.value)
+                  if (docError) setDocError('')
+                }}
                 placeholder="Document name (e.g. roadmap-notes)"
                 autoFocus
               />
+              {docError ? (
+                <span role="alert" className="field-error">{docError}</span>
+              ) : null}
             </div>
             <Button type="submit" className="doc-picker-button doc-picker-button--landing">
               Open document
