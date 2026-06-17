@@ -209,6 +209,7 @@ export function ChatSidebar(props: {
   const [docInsertions, setDocInsertions] = useState<DocInsertMessage[]>([])
   const [showTools, setShowTools] = useState(false)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [pendingSend, setPendingSend] = useState(false)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const editorContextRef = useRef<EditorContextPayload | null>(props.editorContext ?? null)
@@ -310,13 +311,20 @@ export function ChatSidebar(props: {
 
   const busy = isLoading || sessionGenerating
 
+  // Clear the optimistic pending flag once the server has taken over (busy flips true)
+  useEffect(() => {
+    if (busy) setPendingSend(false)
+  }, [busy])
+
+  const showTyping = pendingSend || busy
+
   useEffect(() => {
     props.onStatusChange?.({
       connectionStatus,
       subscribed: isSubscribed,
-      busy,
+      busy: showTyping,
     })
-  }, [busy, connectionStatus, isSubscribed, props.onStatusChange])
+  }, [showTyping, connectionStatus, isSubscribed, props.onStatusChange])
 
   const stuckToBottom = useRef(true)
 
@@ -331,7 +339,7 @@ export function ChatSidebar(props: {
     const el = viewportRef.current
     if (!el || !stuckToBottom.current) return
     el.scrollTop = el.scrollHeight
-  }, [messages, docInsertions, busy])
+  }, [messages, docInsertions, showTyping])
 
   useEffect(() => {
     if (!stuckToBottom.current) return
@@ -481,7 +489,8 @@ export function ChatSidebar(props: {
 
   const handleSend = () => {
     const text = draft.trim()
-    if (!text || busy) return
+    if (!text || showTyping) return
+    setPendingSend(true)
     void sendMessage(text)
     setDraft('')
     // Reset textarea height
@@ -603,16 +612,18 @@ export function ChatSidebar(props: {
             )}
           </ul>
         )}
-        {busy ? (
+        {showTyping ? (
           <div className="chat-typing-row" aria-label="Generating response">
             <div className="chat-typing">
               <span className="chat-typing__dot" />
               <span className="chat-typing__dot" />
               <span className="chat-typing__dot" />
             </div>
-            <Button className="chat-stop-btn chat-stop-btn-inline" onClick={handleStop} aria-label="Stop generating">
-              Stop
-            </Button>
+            {busy ? (
+              <Button className="chat-stop-btn chat-stop-btn-inline" onClick={handleStop} aria-label="Stop generating">
+                Stop
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -641,7 +652,7 @@ export function ChatSidebar(props: {
         <Button
           className="chat-send-inline"
           onClick={handleSend}
-          disabled={busy || !draft.trim()}
+          disabled={showTyping || !draft.trim()}
         >
           Send
         </Button>

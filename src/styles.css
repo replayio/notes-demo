@@ -13,7 +13,7 @@
   --accent-hover: #1d4ed8;
   --accent-fg: #ffffff;
   --success: #16a34a;
-  --danger: #dc2626;
+  --danger: #b91c1c;
   --toolbar-height: 44px;
   --statusbar-height: 26px;
   --radius: 4px;
@@ -761,8 +761,8 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  font-size: 0.6875rem;
-  color: var(--text-muted);
+  font-size: 0.75rem;
+  color: var(--text-subtle);
   user-select: none;
 }
 
@@ -795,7 +795,7 @@ textarea {
 
 .chat-copy-json-btn-failed {
   color: var(--danger);
-  border-color: rgba(220, 38, 38, 0.35);
+  border-color: rgba(185, 28, 28, 0.35);
 }
 
 .chat-loading {
