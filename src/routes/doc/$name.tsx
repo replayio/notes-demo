@@ -35,6 +35,7 @@ import {
 } from '../../components/CollaborativeEditor'
 import { PresenceBar } from '../../components/PresenceBar'
 import { useStoredDisplayName } from '../../lib/ui/displayName'
+import { describeEditorStatus } from '../../lib/ui/editorStatus'
 import type { EditorContextPayload } from '../../lib/agent/editorContext'
 
 export const Route = createFileRoute('/doc/$name')({
@@ -452,7 +453,7 @@ function DocumentPage() {
           ProseMirror
         </a>
         <div className="status-bar__item">
-          Editor {editorState.status} {editorState.synced ? '· synced' : '· syncing'}
+          {describeEditorStatus(editorState)}
         </div>
         <div className="status-bar__item">
           Chat {chatState.connectionStatus}
