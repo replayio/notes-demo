@@ -10,6 +10,28 @@ export function buildAgentSystemPrompt(): string {
   ].join(' ')
 }
 
+/**
+ * System prompt for the deterministic server-side streaming-edit generator.
+ * The generated text is streamed directly into the document, so it must contain
+ * only the document content itself — no chat commentary, labels, or summaries.
+ */
+export function buildStreamingEditSystemPrompt(contentFormat: 'plain_text' | 'markdown'): string {
+  const base = [
+    'You are Electra, a collaborative writing assistant generating content that is streamed directly into a shared document.',
+    'Output only the exact prose that should appear in the document.',
+    'Do not include commentary, labels, explanations, or status messages like "I added" or "Here is".',
+  ]
+  if (contentFormat === 'markdown') {
+    base.push(
+      'Format the content as markdown. Supported formats are paragraphs, headings, bold, italic, inline code, bullet lists, and ordered lists.',
+      'Do not wrap the output in markdown code fences.',
+    )
+  } else {
+    base.push('Write plain prose without markdown markers unless the user explicitly asked for literal punctuation.')
+  }
+  return base.join(' ')
+}
+
 export function buildChatToolSystemPrompt(preferredMode?: AgentRunMode): string {
   const preferred =
     preferredMode && preferredMode !== 'continue'
@@ -42,12 +64,10 @@ export function buildChatToolSystemPrompt(preferredMode?: AgentRunMode): string 
     'For exact insertion requests, insert only the requested literal text. Do not retype, duplicate, or reconstruct unchanged surrounding document content as part of the insertion.',
     'When the user asks for headings, lists, or emphasis to be generated as part of streamed content, you must start streaming edit with contentFormat set to markdown and output only supported markdown.',
     'Supported streamed markdown formats are paragraphs, headings, bold, italic, inline code, bullet lists, and ordered lists.',
-    'Only call start_streaming_edit when you are ready for the next assistant text message to become document content.',
-    'After calling start_streaming_edit, you must emit the actual document content immediately. Do not call the tool and then end your turn without producing the content to insert.',
-    'While a streaming edit is active, output only the exact prose that should appear in the document. Do not include commentary, markdown fences, labels, or explanations.',
+    'Only call start_streaming_edit when you want generated document prose written; the server itself generates and streams that content into the document for you.',
+    'After start_streaming_edit returns, the requested document content has already been written into the document by the server. Do not repeat or restate that content in chat.',
     'Never put status messages like "I added" or "I rewrote" into the document.',
-    'The server auto-stops streaming edit at the end of that assistant text message, but you may call stop_streaming_edit to cancel or finish early.',
-    'Do not include a summary sentence inside streamed document content.',
+    'The server finishes the streaming edit automatically once the content is written, so you normally do not need stop_streaming_edit.',
     'After non-streamed document edits such as delete_selection, insert_text, or set_format, follow up with one short chat sentence describing what you actually changed.',
     'If a tool call did not change the document, do not claim that it did.',
     'If the target is ambiguous or the user intent is unclear, ask a clarifying question instead of editing the wrong text.' + preferred,
@@ -90,6 +110,34 @@ export function buildAgentUserPromptTemplate(mode: AgentRunMode, userPrompt: str
     `Task: ${MODE_INSTRUCTIONS[mode]}`,
     trimmed.length > 0 ? `Instruction:\n${trimmed}` : 'Instruction: (none)',
   ].join('\n\n')
+}
+
+/**
+ * User prompt for the server-side streaming-edit generator. Combines the run
+ * mode task, the user's latest instruction, current document context, and (for
+ * rewrite mode) the original selected passage being replaced.
+ */
+export function buildStreamingEditUserPrompt(input: {
+  mode: AgentRunMode
+  instruction: string
+  documentContext: string
+  selectionText?: string
+}): string {
+  const instruction = input.instruction.trim().slice(0, 2000)
+  const documentContext = input.documentContext.trim().slice(-4000)
+  const sections = [
+    `Task: ${MODE_INSTRUCTIONS[input.mode]}`,
+    instruction.length > 0 ? `Instruction:\n${instruction}` : 'Instruction: (none)',
+  ]
+  if (input.mode === 'rewrite' && input.selectionText && input.selectionText.trim().length > 0) {
+    sections.push(`Passage to rewrite:\n${input.selectionText.trim().slice(0, 2000)}`)
+  }
+  sections.push(
+    documentContext.length > 0
+      ? `Current document for context (do not repeat it):\n${documentContext}`
+      : 'Current document is empty.',
+  )
+  return sections.join('\n\n')
 }
 
 export function buildDeterministicReply(mode: AgentRunMode, userPrompt: string): string {
