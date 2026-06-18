@@ -7,6 +7,8 @@ import {
   buildDeterministicReply,
   buildPostEditSummaryPrompt,
   buildPostEditSummarySystemPrompt,
+  buildStreamingEditSystemPrompt,
+  buildStreamingEditUserPrompt,
 } from '../../src/lib/agent/prompts'
 
 describe('prompt unit tests', () => {
@@ -97,5 +99,43 @@ describe('prompt unit tests', () => {
     expect(systemPrompt).toContain('Do not make any more document changes')
     expect(userPrompt).toContain('User request: Add a short story at the end.')
     expect(userPrompt).toContain('completed a continue streaming edit in plain_text (84 chars)')
+  })
+
+  it('builds streaming-edit system prompts per content format', () => {
+    const plain = buildStreamingEditSystemPrompt('plain_text')
+    const markdown = buildStreamingEditSystemPrompt('markdown')
+
+    expect(plain).toContain('streamed directly into a shared document')
+    expect(plain).toContain('Output only the exact prose')
+    expect(plain).toContain('plain prose without markdown markers')
+    expect(markdown).toContain('Format the content as markdown')
+    expect(markdown).toContain('Do not wrap the output in markdown code fences')
+  })
+
+  it('builds streaming-edit user prompts with instruction, context, and selection', () => {
+    const continuePrompt = buildStreamingEditUserPrompt({
+      mode: 'continue',
+      instruction: 'Write a closing paragraph',
+      documentContext: 'Existing body text.',
+    })
+    const rewritePrompt = buildStreamingEditUserPrompt({
+      mode: 'rewrite',
+      instruction: 'Make it punchier',
+      documentContext: 'Existing body text.',
+      selectionText: 'The old passage.',
+    })
+    const emptyPrompt = buildStreamingEditUserPrompt({
+      mode: 'insert',
+      instruction: '   ',
+      documentContext: '   ',
+    })
+
+    expect(continuePrompt).toContain('Task: Continue the document from the end in the same voice.')
+    expect(continuePrompt).toContain('Instruction:\nWrite a closing paragraph')
+    expect(continuePrompt).toContain('Existing body text.')
+    expect(continuePrompt).not.toContain('Passage to rewrite')
+    expect(rewritePrompt).toContain('Passage to rewrite:\nThe old passage.')
+    expect(emptyPrompt).toContain('Instruction: (none)')
+    expect(emptyPrompt).toContain('Current document is empty.')
   })
 })

@@ -21,6 +21,7 @@ import {
 } from '../../lib/agent/prompts'
 import { createDocumentTools } from '../../lib/agent/documentTools'
 import { DocumentToolRuntime } from '../../lib/agent/documentToolRuntime'
+import { createStreamingEditContentGenerator } from '../../lib/agent/streamingEditContent'
 import type { EditorContextPayload } from '../../lib/agent/editorContext'
 import {
   chatSessionStreamPath,
@@ -88,6 +89,16 @@ function resolveWaitUntil(
   return undefined
 }
 
+function latestUserInstruction(messages: DurableSessionMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message && message.role === 'user') {
+      return textFromDurableMessage(message)
+    }
+  }
+  return ''
+}
+
 async function* agentResponseStream(input: {
   docKey: string
   sessionId: string
@@ -109,6 +120,9 @@ async function* agentResponseStream(input: {
       sessionId: input.sessionId,
       signal: abortController.signal,
       editorContext: input.editorContext,
+      streamingEditGenerator: createStreamingEditContentGenerator({
+        instruction: latestUserInstruction(input.messages),
+      }),
     })
     const selectionSnapshot = runtime.getSelectionSnapshot()
     const editorContextPrompt = buildEditorContextSystemPrompt({

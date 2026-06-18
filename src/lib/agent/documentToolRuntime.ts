@@ -281,6 +281,30 @@ export type FormatName =
   | 'ordered_list'
 export type FormatAction = 'add' | 'remove' | 'toggle' | 'set'
 export type ContentFormat = 'plain_text' | 'markdown'
+
+export interface StreamingEditGenerationContext {
+  mode: AgentRunMode
+  contentFormat: ContentFormat
+  documentContext: string
+  /** For rewrite mode: the original selected passage being replaced. */
+  selectionText?: string
+  signal?: AbortSignal
+}
+
+/**
+ * Produces the document prose for an open streaming edit. Bound by the chat
+ * route so content generation is driven deterministically on the server instead
+ * of depending on the model volunteering a follow-up assistant text turn.
+ */
+export type StreamingEditContentGenerator = (
+  ctx: StreamingEditGenerationContext,
+) => AsyncIterable<string>
+
+export interface StreamingEditEventEmitter {
+  start: (value: { messageId: string; mode: AgentRunMode; contentFormat: ContentFormat }) => void
+  delta: (value: { messageId: string; delta: string }) => void
+  end: (value: { messageId: string; committedChars: number; cancelled?: boolean }) => void
+}
 export type CompletedDocumentMutation =
   | { kind: 'insert_text'; insertedChars: number }
   | { kind: 'insert_paragraph_break' }
@@ -318,6 +342,7 @@ export class DocumentToolRuntime {
   private selectionEndBytes: Uint8Array | undefined
   private readonly matches = new Map<string, SearchMatchHandle>()
   private activeEdit: ActiveStreamingEdit | null = null
+  private streamingEditGenerator: StreamingEditContentGenerator | undefined
   private readonly completedMutations: CompletedDocumentMutation[] = []
 
   private constructor(
@@ -332,9 +357,11 @@ export class DocumentToolRuntime {
     sessionId: string
     signal?: AbortSignal
     editorContext?: EditorContextPayload
+    streamingEditGenerator?: StreamingEditContentGenerator
   }): Promise<DocumentToolRuntime> {
     const session = createServerAgentSession(input.docKey, input.sessionId)
     const runtime = new DocumentToolRuntime(session, input.signal)
+    runtime.streamingEditGenerator = input.streamingEditGenerator
     await waitForProviderSync(session.provider, 20_000)
     ensureMinimumBlock(session, runtime.origin)
     runtime.applyEditorContext(input.editorContext)
@@ -347,8 +374,10 @@ export class DocumentToolRuntime {
     session: ServerAgentSession
     signal?: AbortSignal
     editorContext?: EditorContextPayload
+    streamingEditGenerator?: StreamingEditContentGenerator
   }): DocumentToolRuntime {
     const runtime = new DocumentToolRuntime(input.session, input.signal)
+    runtime.streamingEditGenerator = input.streamingEditGenerator
     ensureMinimumBlock(input.session, runtime.origin)
     runtime.applyEditorContext(input.editorContext)
     runtime.ensureCursorAtEnd()
@@ -981,6 +1010,57 @@ export class DocumentToolRuntime {
       mode: this.activeEdit.mode,
       contentFormat: this.activeEdit.contentFormat,
     }
+  }
+
+  hasStreamingEditGenerator(): boolean {
+    return this.streamingEditGenerator !== undefined
+  }
+
+  /**
+   * Drive the open streaming edit to completion by pulling prose from the bound
+   * content generator and committing it into the Yjs document. This removes the
+   * dependency on the model volunteering a follow-up assistant text turn, which
+   * reasoning models do not reliably do (see bug-mqiof6o8-1og6).
+   */
+  async driveStreamingEditContent(
+    emitter: StreamingEditEventEmitter,
+  ): Promise<{ ok: true; committedChars: number; cancelled?: boolean }> {
+    const edit = this.activeEdit
+    const generator = this.streamingEditGenerator
+    if (!edit || !generator) {
+      return { ok: true, committedChars: 0 }
+    }
+    const messageId = edit.id
+    const { mode, contentFormat } = edit
+    emitter.start({ messageId, mode, contentFormat })
+    try {
+      const stream = generator({
+        mode,
+        contentFormat,
+        documentContext: this.getDocumentSnapshot().text,
+        ...(edit.deletedSelectionText ? { selectionText: edit.deletedSelectionText } : {}),
+        signal: this.signal,
+      })
+      for await (const delta of stream) {
+        this.throwIfAborted()
+        if (delta.length === 0) continue
+        await this.pushStreamingText(delta)
+        emitter.delta({ messageId, delta })
+      }
+    } catch (error) {
+      const cancelled = error instanceof DOMException && error.name === 'AbortError'
+      const result = this.stopStreamingEdit(cancelled)
+      emitter.end({
+        messageId,
+        committedChars: result.committedChars,
+        ...(result.cancelled ? { cancelled: true } : {}),
+      })
+      if (cancelled) return result
+      throw error
+    }
+    const result = this.stopStreamingEdit(false)
+    emitter.end({ messageId, committedChars: result.committedChars })
+    return result
   }
 
   private insertMarkdownDocument(

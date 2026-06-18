@@ -137,7 +137,7 @@ const deleteSelectionDef = toolDefinition({
 const startStreamingEditDef = toolDefinition({
   name: 'start_streaming_edit',
   description:
-    'Arm the next assistant text message for document insertion at the current cursor or selection. Use this when the user wants actual document prose written, such as a story, paragraph, continuation, or rewrite. While active, output only document prose, not explanations. Set contentFormat to markdown when you want streamed markdown to become structured document formatting. Use rewrite mode only when a selection is already set.',
+    'Generate and stream document prose into the document at the current cursor or selection. Use this when the user wants actual document prose written, such as a story, paragraph, continuation, or rewrite. The server generates and writes the content for you, so do not output the prose yourself in chat. Set contentFormat to markdown when you want streamed markdown to become structured document formatting. Use rewrite mode only when a selection is already set.',
   inputSchema: z.object({
     mode: z.enum(['continue', 'insert', 'rewrite']),
     contentFormat: z.enum(['plain_text', 'markdown']).optional(),
@@ -261,7 +261,39 @@ export function createDocumentTools(runtime: DocumentToolRuntime) {
         mode,
         contentFormat: result.contentFormat,
       })
-      return result
+      // When a server-side content generator is bound, drive generation here so
+      // content deltas are produced deterministically for the opened session
+      // instead of depending on the model volunteering a follow-up text turn
+      // (bug-mqiof6o8-1og6). Without a generator (e.g. unit tests), callers push
+      // content manually and stop the edit themselves.
+      if (!runtime.hasStreamingEditGenerator()) {
+        return result
+      }
+      const driven = await runtime.driveStreamingEditContent({
+        start: (value) =>
+          context?.emitCustomEvent('streaming-insert-start', {
+            messageId: value.messageId,
+            mode: value.mode,
+            contentFormat: value.contentFormat,
+          }),
+        delta: (value) =>
+          context?.emitCustomEvent('streaming-insert-delta', {
+            messageId: value.messageId,
+            delta: value.delta,
+          }),
+        end: (value) =>
+          context?.emitCustomEvent('streaming-insert-end', {
+            messageId: value.messageId,
+            committedChars: value.committedChars,
+            ...(value.cancelled ? { cancelled: true } : {}),
+          }),
+      })
+      context?.emitCustomEvent('agent-streaming-edit', { active: false })
+      return {
+        ...result,
+        committedChars: driven.committedChars,
+        ...(driven.cancelled ? { cancelled: true } : {}),
+      }
     }),
     stopStreamingEditDef.server(async (_args, context) => {
       const result = runtime.stopStreamingEdit(false)
