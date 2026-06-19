@@ -1,4 +1,4 @@
-import type { EditorConnectionState } from '../../components/CollaborativeEditor'
+import type { EditorConnectionState } from '../../components/GitbookCollaborativeEditor'
 
 /**
  * Map the collaborative editor connection state to a single, non-contradictory

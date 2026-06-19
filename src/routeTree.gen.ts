@@ -10,9 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as WWorkspaceRouteImport } from './routes/w/$workspace'
 import { Route as DocNameRouteImport } from './routes/doc/$name'
 import { Route as ApiChatStreamRouteImport } from './routes/api/chat-stream'
 import { Route as ApiChatRouteImport } from './routes/api/chat'
+import { Route as WWorkspaceIndexRouteImport } from './routes/w/$workspace/index'
+import { Route as WWorkspaceNoteRouteImport } from './routes/w/$workspace/$note'
 import { Route as ApiYjsSplatRouteImport } from './routes/api/yjs/$'
 import { Route as ApiAgentStopRouteImport } from './routes/api/agent/stop'
 import { Route as ApiYjsDocsSplatRouteImport } from './routes/api/yjs/docs/$'
@@ -20,6 +23,11 @@ import { Route as ApiYjsDocsSplatRouteImport } from './routes/api/yjs/docs/$'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WWorkspaceRoute = WWorkspaceRouteImport.update({
+  id: '/w/$workspace',
+  path: '/w/$workspace',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DocNameRoute = DocNameRouteImport.update({
@@ -36,6 +44,16 @@ const ApiChatRoute = ApiChatRouteImport.update({
   id: '/api/chat',
   path: '/api/chat',
   getParentRoute: () => rootRouteImport,
+} as any)
+const WWorkspaceIndexRoute = WWorkspaceIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => WWorkspaceRoute,
+} as any)
+const WWorkspaceNoteRoute = WWorkspaceNoteRouteImport.update({
+  id: '/$note',
+  path: '/$note',
+  getParentRoute: () => WWorkspaceRoute,
 } as any)
 const ApiYjsSplatRoute = ApiYjsSplatRouteImport.update({
   id: '/api/yjs/$',
@@ -58,8 +76,11 @@ export interface FileRoutesByFullPath {
   '/api/chat': typeof ApiChatRoute
   '/api/chat-stream': typeof ApiChatStreamRoute
   '/doc/$name': typeof DocNameRoute
+  '/w/$workspace': typeof WWorkspaceRouteWithChildren
   '/api/agent/stop': typeof ApiAgentStopRoute
   '/api/yjs/$': typeof ApiYjsSplatRoute
+  '/w/$workspace/$note': typeof WWorkspaceNoteRoute
+  '/w/$workspace/': typeof WWorkspaceIndexRoute
   '/api/yjs/docs/$': typeof ApiYjsDocsSplatRoute
 }
 export interface FileRoutesByTo {
@@ -69,6 +90,8 @@ export interface FileRoutesByTo {
   '/doc/$name': typeof DocNameRoute
   '/api/agent/stop': typeof ApiAgentStopRoute
   '/api/yjs/$': typeof ApiYjsSplatRoute
+  '/w/$workspace/$note': typeof WWorkspaceNoteRoute
+  '/w/$workspace': typeof WWorkspaceIndexRoute
   '/api/yjs/docs/$': typeof ApiYjsDocsSplatRoute
 }
 export interface FileRoutesById {
@@ -77,8 +100,11 @@ export interface FileRoutesById {
   '/api/chat': typeof ApiChatRoute
   '/api/chat-stream': typeof ApiChatStreamRoute
   '/doc/$name': typeof DocNameRoute
+  '/w/$workspace': typeof WWorkspaceRouteWithChildren
   '/api/agent/stop': typeof ApiAgentStopRoute
   '/api/yjs/$': typeof ApiYjsSplatRoute
+  '/w/$workspace/$note': typeof WWorkspaceNoteRoute
+  '/w/$workspace/': typeof WWorkspaceIndexRoute
   '/api/yjs/docs/$': typeof ApiYjsDocsSplatRoute
 }
 export interface FileRouteTypes {
@@ -88,8 +114,11 @@ export interface FileRouteTypes {
     | '/api/chat'
     | '/api/chat-stream'
     | '/doc/$name'
+    | '/w/$workspace'
     | '/api/agent/stop'
     | '/api/yjs/$'
+    | '/w/$workspace/$note'
+    | '/w/$workspace/'
     | '/api/yjs/docs/$'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -99,6 +128,8 @@ export interface FileRouteTypes {
     | '/doc/$name'
     | '/api/agent/stop'
     | '/api/yjs/$'
+    | '/w/$workspace/$note'
+    | '/w/$workspace'
     | '/api/yjs/docs/$'
   id:
     | '__root__'
@@ -106,8 +137,11 @@ export interface FileRouteTypes {
     | '/api/chat'
     | '/api/chat-stream'
     | '/doc/$name'
+    | '/w/$workspace'
     | '/api/agent/stop'
     | '/api/yjs/$'
+    | '/w/$workspace/$note'
+    | '/w/$workspace/'
     | '/api/yjs/docs/$'
   fileRoutesById: FileRoutesById
 }
@@ -116,6 +150,7 @@ export interface RootRouteChildren {
   ApiChatRoute: typeof ApiChatRoute
   ApiChatStreamRoute: typeof ApiChatStreamRoute
   DocNameRoute: typeof DocNameRoute
+  WWorkspaceRoute: typeof WWorkspaceRouteWithChildren
   ApiAgentStopRoute: typeof ApiAgentStopRoute
   ApiYjsSplatRoute: typeof ApiYjsSplatRoute
   ApiYjsDocsSplatRoute: typeof ApiYjsDocsSplatRoute
@@ -128,6 +163,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/w/$workspace': {
+      id: '/w/$workspace'
+      path: '/w/$workspace'
+      fullPath: '/w/$workspace'
+      preLoaderRoute: typeof WWorkspaceRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/doc/$name': {
@@ -150,6 +192,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/api/chat'
       preLoaderRoute: typeof ApiChatRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/w/$workspace/': {
+      id: '/w/$workspace/'
+      path: '/'
+      fullPath: '/w/$workspace/'
+      preLoaderRoute: typeof WWorkspaceIndexRouteImport
+      parentRoute: typeof WWorkspaceRoute
+    }
+    '/w/$workspace/$note': {
+      id: '/w/$workspace/$note'
+      path: '/$note'
+      fullPath: '/w/$workspace/$note'
+      preLoaderRoute: typeof WWorkspaceNoteRouteImport
+      parentRoute: typeof WWorkspaceRoute
     }
     '/api/yjs/$': {
       id: '/api/yjs/$'
@@ -175,11 +231,26 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface WWorkspaceRouteChildren {
+  WWorkspaceNoteRoute: typeof WWorkspaceNoteRoute
+  WWorkspaceIndexRoute: typeof WWorkspaceIndexRoute
+}
+
+const WWorkspaceRouteChildren: WWorkspaceRouteChildren = {
+  WWorkspaceNoteRoute: WWorkspaceNoteRoute,
+  WWorkspaceIndexRoute: WWorkspaceIndexRoute,
+}
+
+const WWorkspaceRouteWithChildren = WWorkspaceRoute._addFileChildren(
+  WWorkspaceRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApiChatRoute: ApiChatRoute,
   ApiChatStreamRoute: ApiChatStreamRoute,
   DocNameRoute: DocNameRoute,
+  WWorkspaceRoute: WWorkspaceRouteWithChildren,
   ApiAgentStopRoute: ApiAgentStopRoute,
   ApiYjsSplatRoute: ApiYjsSplatRoute,
   ApiYjsDocsSplatRoute: ApiYjsDocsSplatRoute,

@@ -2,11 +2,30 @@ import type { AgentRunMode } from './types'
 import type { CompletedDocumentMutation } from './documentToolRuntime'
 import type { EditorContextPayload } from './editorContext'
 
+/**
+ * The document is GitBook-flavored markdown. This describes the exact syntax the
+ * renderer understands, so generated content maps to rich blocks.
+ */
+export const GITBOOK_FORMAT_GUIDE = [
+  'The document is GitBook-flavored markdown. Use these formats:',
+  '- Headings with #, ##, ###; bold **text**, italic *text*, strikethrough ~~text~~, inline code `code`, links [label](url).',
+  '- Bullet lists with "- ", ordered lists with "1. ", task lists with "- [ ] " and "- [x] ".',
+  '- Blockquotes with "> ". Horizontal rule with "---".',
+  '- Fenced code blocks: ```lang\\ncode\\n``` (include a language).',
+  '- Tables with standard | header | rows |.',
+  '- Callouts: {% hint style="info" %} ... {% endhint %} (style: info, warning, success, danger).',
+  '- Tabs: {% tabs %}{% tab title="A" %} ... {% endtab %}{% endtabs %}.',
+  '- Expandable: {% expandable %} ... {% endexpandable %}.',
+  '- Steppers: {% stepper %}{% step %} ... {% endstep %}{% endstepper %}.',
+  '- Columns: {% columns %}{% column %} ... {% endcolumn %}{% endcolumns %}.',
+  '- Math blocks: $$ formula $$. Embeds: {% embed url="..." %}.',
+].join('\n')
+
 export function buildAgentSystemPrompt(): string {
   return [
     'You are Electra, a collaborative writing assistant.',
-    'You write into the shared ProseMirror document as a server-side peer.',
-    'Keep output as plain prose suitable for paragraph insertion unless asked otherwise.',
+    'You write into a shared GitBook-flavored markdown document as a server-side peer.',
+    GITBOOK_FORMAT_GUIDE,
   ].join(' ')
 }
 
@@ -15,21 +34,13 @@ export function buildAgentSystemPrompt(): string {
  * The generated text is streamed directly into the document, so it must contain
  * only the document content itself — no chat commentary, labels, or summaries.
  */
-export function buildStreamingEditSystemPrompt(contentFormat: 'plain_text' | 'markdown'): string {
-  const base = [
-    'You are Electra, a collaborative writing assistant generating content that is streamed directly into a shared document.',
-    'Output only the exact prose that should appear in the document.',
-    'Do not include commentary, labels, explanations, or status messages like "I added" or "Here is".',
-  ]
-  if (contentFormat === 'markdown') {
-    base.push(
-      'Format the content as markdown. Supported formats are paragraphs, headings, bold, italic, inline code, bullet lists, and ordered lists.',
-      'Do not wrap the output in markdown code fences.',
-    )
-  } else {
-    base.push('Write plain prose without markdown markers unless the user explicitly asked for literal punctuation.')
-  }
-  return base.join(' ')
+export function buildStreamingEditSystemPrompt(_contentFormat: 'plain_text' | 'markdown'): string {
+  return [
+    'You are Electra, a collaborative writing assistant generating content that is streamed directly into a shared GitBook-flavored markdown document.',
+    'Output only the exact document content itself — no commentary, labels, explanations, or status messages like "I added" or "Here is".',
+    'Do not wrap the whole answer in a markdown code fence (fenced code blocks are only for actual code).',
+    GITBOOK_FORMAT_GUIDE,
+  ].join(' ')
 }
 
 export function buildChatToolSystemPrompt(preferredMode?: AgentRunMode): string {
@@ -50,8 +61,7 @@ export function buildChatToolSystemPrompt(preferredMode?: AgentRunMode): string 
     'When the user asks to change the same exact name or phrase in multiple places, use search_text to gather all exact matches and prefer replace_matches over editing occurrences one by one.',
     'Use select_current_block when the user asks to format or rewrite the current line, current paragraph, or current block and the cursor is already in the right place.',
     'For formatting existing words or phrases, prefer selecting the exact text and using set_format.',
-    'If you instead replace a matched word or a selected span using markdown markers like **bold**, *italic*, or `code`, you must set contentFormat to markdown on replace_matches or insert_text so the markers become formatting rather than literal characters.',
-    'If the user explicitly wants literal asterisks, underscores, or backticks inserted as text, keep contentFormat as plain_text.',
+    'The document is GitBook-flavored markdown, so any markdown you insert becomes real formatting; write **bold**, *italic*, `code`, lists, tables, code fences, and GitBook blocks directly as markdown.',
     'For requests to add content at the very top or very end of the document, use place_cursor_at_document_boundary rather than guessing with search results.',
     'When the user asks for a new paragraph, second paragraph, closing paragraph, or another distinct paragraph block, place the cursor at the target location, call insert_paragraph_break, then stream the new paragraph text into that new block.',
     'When the user asks for a title for the whole document, place the cursor at the very top first. Prefer a markdown heading when the title should be styled as a heading.',
@@ -62,8 +72,8 @@ export function buildChatToolSystemPrompt(preferredMode?: AgentRunMode): string 
     'Prefer insert_text for short exact literal strings the user provided verbatim. Prefer start_streaming_edit for generated prose.',
     'When the user gives exact text to insert, preserve it exactly and do not add extra spaces, line breaks, punctuation, or explanatory words unless the user explicitly asked for them.',
     'For exact insertion requests, insert only the requested literal text. Do not retype, duplicate, or reconstruct unchanged surrounding document content as part of the insertion.',
-    'When the user asks for headings, lists, or emphasis to be generated as part of streamed content, you must start streaming edit with contentFormat set to markdown and output only supported markdown.',
-    'Supported streamed markdown formats are paragraphs, headings, bold, italic, inline code, bullet lists, and ordered lists.',
+    'When the user asks for headings, lists, tables, callouts, code blocks, or other structure, write them using GitBook markdown syntax.',
+    GITBOOK_FORMAT_GUIDE,
     'Only call start_streaming_edit when you want generated document prose written; the server itself generates and streams that content into the document for you.',
     'After start_streaming_edit returns, the requested document content has already been written into the document by the server. Do not repeat or restate that content in chat.',
     'Never put status messages like "I added" or "I rewrote" into the document.',

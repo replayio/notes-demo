@@ -2,7 +2,9 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Button } from '@base-ui/react/button'
 import { Input } from '@base-ui/react/input'
-import { useStoredDisplayName } from '../lib/ui/displayName'
+import { useStoredDisplayName, useStoredCompany } from '../lib/ui/displayName'
+import { COMPANIES, avatarColor, initials } from '../lib/ui/companies'
+import { slugifyWorkspace } from '../lib/yjs/streamIds'
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -10,14 +12,18 @@ export const Route = createFileRoute('/')({
 
 function Home() {
   const navigate = Route.useNavigate()
-  const [draftDoc, setDraftDoc] = useState('')
-  const [docError, setDocError] = useState('')
   const { displayName, saveDisplayName } = useStoredDisplayName()
+  const { company, saveCompany } = useStoredCompany()
   const [draftName, setDraftName] = useState(displayName)
+  const [draftCompany, setDraftCompany] = useState(company)
 
   useEffect(() => {
     setDraftName(displayName)
   }, [displayName])
+
+  useEffect(() => {
+    setDraftCompany(company)
+  }, [company])
 
   return (
     <main className="landing-page">
@@ -26,22 +32,19 @@ function Home() {
           <p className="landing-kicker">Electra</p>
           <h1 className="page-title">Collaborative AI Editor</h1>
           <p className="page-lead">
-            Create or join a document to start writing collaboratively
-            with other people and an AI assistant.
+            Pick your company workspace and start writing collaboratively
+            with your teammates and an AI assistant.
           </p>
           <form
             className="landing-form"
             onSubmit={(e) => {
               e.preventDefault()
-              const next = draftDoc.trim()
-              if (!next) {
-                setDocError('Document name is required')
-                return
-              }
-              saveDisplayName(draftName)
+              const nextName = saveDisplayName(draftName)
+              const nextCompany = saveCompany(draftCompany)
+              setDraftName(nextName)
               void navigate({
-                to: '/doc/$name',
-                params: { name: next },
+                to: '/w/$workspace',
+                params: { workspace: slugifyWorkspace(nextCompany) },
               })
             }}
           >
@@ -49,41 +52,53 @@ function Home() {
               <label className="field-label" htmlFor="display-name">
                 Your name
               </label>
-              <Input
-                id="display-name"
-                className="doc-picker-input doc-picker-input--landing"
-                type="text"
-                value={draftName}
-                onChange={(e) => setDraftName(e.target.value)}
-                onBlur={() => {
-                  const next = saveDisplayName(draftName)
-                  setDraftName(next)
-                }}
-                placeholder="Choose a display name"
-              />
+              <div className="company-picker">
+                <span
+                  className="company-picker__avatar"
+                  style={{ backgroundColor: avatarColor(draftCompany) }}
+                  title={draftCompany}
+                  aria-hidden="true"
+                >
+                  {initials(draftName)}
+                </span>
+                <Input
+                  id="display-name"
+                  className="doc-picker-input doc-picker-input--landing company-picker__name"
+                  type="text"
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onBlur={() => {
+                    const next = saveDisplayName(draftName)
+                    setDraftName(next)
+                  }}
+                  placeholder="Your name"
+                  autoFocus
+                />
+              </div>
             </div>
             <div className="field-stack">
-              <label className="field-label" htmlFor="document-name">
-                Document name
+              <label className="field-label" htmlFor="company-select">
+                Company workspace
               </label>
-              <Input
-                id="document-name"
-                className="doc-picker-input doc-picker-input--landing"
-                type="text"
-                value={draftDoc}
+              <select
+                id="company-select"
+                className="doc-picker-input doc-picker-input--landing company-picker__select"
+                value={draftCompany}
                 onChange={(e) => {
-                  setDraftDoc(e.target.value)
-                  if (docError) setDocError('')
+                  const next = e.target.value
+                  setDraftCompany(next)
+                  saveCompany(next)
                 }}
-                placeholder="Document name (e.g. roadmap-notes)"
-                autoFocus
-              />
-              {docError ? (
-                <span role="alert" className="field-error">{docError}</span>
-              ) : null}
+              >
+                {COMPANIES.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
             </div>
             <Button type="submit" className="doc-picker-button doc-picker-button--landing">
-              Open document
+              Open {draftCompany} workspace
             </Button>
           </form>
         </div>

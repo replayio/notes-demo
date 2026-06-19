@@ -1,36 +1,22 @@
-import { Fragment as PMFragment, type Node as PMNode } from 'prosemirror-model'
-import { EditorState, TextSelection } from 'prosemirror-state'
-import { setBlockType, splitBlock } from 'prosemirror-commands'
-import { wrapInList, liftListItem } from 'prosemirror-schema-list'
 import type { YjsProvider } from '@durable-streams/y-durable-streams'
-import * as Y from 'yjs'
+import { encodeAnchor, decodeAnchor, decodeAnchorBase64, bytesToBase64Str } from './markdownAnchors'
 import {
-  absolutePositionToRelativePosition,
-  initProseMirrorDoc,
-  updateYFragment,
-} from 'y-prosemirror'
-import { schema } from '../editor/schema'
-import { decodeAnchor, decodeAnchorBase64 } from './relativeAnchors'
-import type { ProsemirrorMapping } from './relativeAnchors'
-import { createAgentTransactionOrigin, createServerAgentSession, type ServerAgentSession } from './serverAgentSession'
-import {
-  createStreamingMarkdownState,
-  diffMarkdownDocsForAppend,
-  endStreamingMarkdown,
-  isEffectivelyEmptyMarkdownDoc,
-  parseInlineMarkdownFragment,
-  streamStateToProsemirrorDoc,
-  writeStreamingMarkdown,
-  type StreamingMarkdownState,
-} from './markdownToProsemirror'
-import { takeStablePrefix } from './stability'
+  createAgentTransactionOrigin,
+  createServerAgentSession,
+  type ServerAgentSession,
+} from './serverAgentSession'
 import type { AgentRunMode, AgentTransactionOrigin } from './types'
 import type { EditorContextPayload } from './editorContext'
 
+/**
+ * Server-side editing runtime. The document is a single `Y.Text` holding GitBook
+ * markdown, so every operation here is a string edit (insert / delete / replace)
+ * on that text, with positions anchored as Yjs relative positions so they stay
+ * stable across concurrent edits.
+ */
+
 function waitForProviderSync(provider: YjsProvider, timeoutMs: number): Promise<void> {
-  if (provider.synced) {
-    return Promise.resolve()
-  }
+  if (provider.synced) return Promise.resolve()
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
       provider.off('synced', onSync)
@@ -47,157 +33,8 @@ function waitForProviderSync(provider: YjsProvider, timeoutMs: number): Promise<
   })
 }
 
-function clampTextPos(doc: PMNode, pos: number): number {
-  const size = doc.content.size
-  const clamped = Math.max(0, Math.min(pos, size))
-  try {
-    doc.resolve(clamped)
-    return clamped
-  } catch {
-    return TextSelection.atEnd(doc).from
-  }
-}
-
-function ensureMinimumBlock(session: ServerAgentSession, origin: AgentTransactionOrigin): void {
-  if (session.fragment.length > 0) {
-    return
-  }
-  const emptyDoc = schema.node('doc', null, [schema.node('paragraph')])
-  const meta = { mapping: new Map(), isOMark: new Map() }
-  session.ydoc.transact((tr) => {
-    tr.meta.set('addToHistory', false)
-    updateYFragment(session.ydoc, session.fragment, emptyDoc, meta as never)
-  }, origin)
-}
-
-function isEmptyBootstrapDoc(doc: PMNode): boolean {
-  return (
-    doc.childCount === 1 &&
-    doc.firstChild?.type === schema.nodes.paragraph &&
-    doc.firstChild.content.size === 0
-  )
-}
-
-function applyPmRootToY(
-  session: ServerAgentSession,
-  nextDoc: import('prosemirror-model').Node,
-  meta: ReturnType<typeof initProseMirrorDoc>['meta'],
-  origin: AgentTransactionOrigin,
-): void {
-  session.ydoc.transact((ytr) => {
-    ytr.meta.set('addToHistory', false)
-    updateYFragment(session.ydoc, session.fragment, nextDoc, meta as never)
-  }, origin)
-}
-
-function insertAt(
-  session: ServerAgentSession,
-  origin: AgentTransactionOrigin,
-  text: string,
-  pos: number,
-): number {
-  const { doc, meta } = initProseMirrorDoc(session.fragment, schema)
-  const insertPos = clampTextPos(doc, pos)
-  const state = EditorState.create({ doc, schema })
-  const tr = state.tr
-  tr.setMeta('addToHistory', false)
-  tr.insertText(text, insertPos)
-  if (!tr.docChanged) {
-    return insertPos
-  }
-  applyPmRootToY(session, tr.doc, meta, origin)
-  return insertPos + text.length
-}
-
-function replaceRange(
-  session: ServerAgentSession,
-  origin: AgentTransactionOrigin,
-  from: number,
-  to: number,
-  text: string,
-): number {
-  const { doc, meta } = initProseMirrorDoc(session.fragment, schema)
-  const safeFrom = clampTextPos(doc, Math.min(from, to))
-  const safeTo = clampTextPos(doc, Math.max(from, to))
-  const state = EditorState.create({ doc, schema })
-  const tr = state.tr
-  tr.setMeta('addToHistory', false)
-  tr.insertText(text, safeFrom, safeTo)
-  if (!tr.docChanged) {
-    return safeFrom
-  }
-  applyPmRootToY(session, tr.doc, meta, origin)
-  return safeFrom + text.length
-}
-
-function deleteRange(
-  session: ServerAgentSession,
-  origin: AgentTransactionOrigin,
-  from: number,
-  to: number,
-): number {
-  const { doc, meta } = initProseMirrorDoc(session.fragment, schema)
-  const safeFrom = clampTextPos(doc, Math.min(from, to))
-  const safeTo = clampTextPos(doc, Math.max(from, to))
-  const state = EditorState.create({ doc, schema })
-  const tr = state.tr
-  tr.setMeta('addToHistory', false)
-  tr.delete(safeFrom, safeTo)
-  if (!tr.docChanged) {
-    return safeFrom
-  }
-  applyPmRootToY(session, tr.doc, meta, origin)
-  return safeFrom
-}
-
-function replaceRangeWithFragment(
-  session: ServerAgentSession,
-  origin: AgentTransactionOrigin,
-  from: number,
-  to: number,
-  fragment: PMFragment,
-): { endPos: number; tailTextPos: number } {
-  const { doc, meta } = initProseMirrorDoc(session.fragment, schema)
-  const safeFrom = clampTextPos(doc, Math.min(from, to))
-  const safeTo = clampTextPos(doc, Math.max(from, to))
-  const state = EditorState.create({ doc, schema })
-  const tr = state.tr
-  tr.setMeta('addToHistory', false)
-  tr.replaceWith(safeFrom, safeTo, fragment)
-  if (!tr.docChanged) {
-    return { endPos: safeFrom, tailTextPos: safeFrom }
-  }
-  applyPmRootToY(session, tr.doc, meta, origin)
-  const endPos = safeFrom + fragment.size
-  let tailTextPos = endPos
-  tr.doc.nodesBetween(safeFrom, endPos, (node, pos) => {
-    if (node.isTextblock) {
-      tailTextPos = pos + node.nodeSize - 1
-    }
-  })
-  return { endPos, tailTextPos }
-}
-
-function encodeAnchorAt(
-  session: ServerAgentSession,
-  absPos: number,
-  mapping: ProsemirrorMapping,
-): Uint8Array {
-  const rel = absolutePositionToRelativePosition(absPos, session.fragment, mapping as never)
-  return Y.encodeRelativePosition(rel)
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64')
-}
-
-function resolveAnchor(
-  session: ServerAgentSession,
-  mapping: ProsemirrorMapping,
-  anchor: Uint8Array | undefined,
-): number | null {
-  if (!anchor) return null
-  return decodeAnchor(session.ydoc, session.fragment, mapping, anchor)
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(value, max))
 }
 
 function normalizeRange(from: number, to: number): { from: number; to: number } {
@@ -206,57 +43,21 @@ function normalizeRange(from: number, to: number): { from: number; to: number } 
 
 function preview(text: string, index: number, queryLength: number): { before: string; after: string } {
   return {
-    before: text.slice(Math.max(0, index - 30), index),
-    after: text.slice(index + queryLength, Math.min(text.length, index + queryLength + 30)),
+    before: text.slice(Math.max(0, index - 40), index),
+    after: text.slice(index + queryLength, Math.min(text.length, index + queryLength + 40)),
   }
 }
 
-function isNodeActive(state: EditorState, nodeType: import('prosemirror-model').NodeType): boolean {
-  const { $from } = state.selection
-  for (let d = $from.depth; d >= 0; d--) {
-    if ($from.node(d).type === nodeType) return true
-  }
-  return false
+/** Expand [from,to] to the full lines they touch. */
+function lineBounds(s: string, from: number, to: number): { start: number; end: number } {
+  const start = s.lastIndexOf('\n', Math.max(0, from - 1)) + 1
+  let end = s.indexOf('\n', to)
+  if (end < 0) end = s.length
+  return { start, end }
 }
 
-function resolveBlockInsertPos(doc: PMNode, pos: number): number {
-  const clamped = Math.max(0, Math.min(pos, doc.content.size))
-  const $pos = doc.resolve(clamped)
-  if ($pos.depth === 0) {
-    return clamped
-  }
-  if ($pos.parentOffset === 0) {
-    return $pos.before($pos.depth)
-  }
-  if ($pos.parentOffset === $pos.parent.content.size) {
-    return $pos.after($pos.depth)
-  }
-  return $pos.after($pos.depth)
-}
-
-function resolveNodePathPosition(doc: PMNode, path: number[]): { node: PMNode; pos: number } | null {
-  let node = doc
-  let pos = 0
-
-  for (let depth = 0; depth < path.length; depth++) {
-    const index = path[depth]!
-    if (index < 0 || index >= node.childCount) return null
-    let offset = 0
-    for (let i = 0; i < index; i++) offset += node.child(i).nodeSize
-    pos = node.type === schema.nodes.doc ? pos + offset : pos + 1 + offset
-    node = node.child(index)
-  }
-
-  return { node, pos }
-}
-
-function insertionPosAtEndOfNode(doc: PMNode, path: number[]): number | null {
-  if (path.length === 0) {
-    return doc.content.size
-  }
-  const resolved = resolveNodePathPosition(doc, path)
-  if (!resolved) return null
-  return resolved.pos + resolved.node.content.size + 1
+function stripLeadingBlockMarkers(line: string): string {
+  return line.replace(/^\s*(#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s+)/, '')
 }
 
 export interface SearchMatchResult {
@@ -267,8 +68,6 @@ export interface SearchMatchResult {
   startAnchorB64: string
   endAnchorB64: string
 }
-
-type SearchMatchHandle = SearchMatchResult
 
 export type FormatKind = 'mark' | 'block'
 export type FormatName =
@@ -291,11 +90,6 @@ export interface StreamingEditGenerationContext {
   signal?: AbortSignal
 }
 
-/**
- * Produces the document prose for an open streaming edit. Bound by the chat
- * route so content generation is driven deterministically on the server instead
- * of depending on the model volunteering a follow-up assistant text turn.
- */
 export type StreamingEditContentGenerator = (
   ctx: StreamingEditGenerationContext,
 ) => AsyncIterable<string>
@@ -305,6 +99,7 @@ export interface StreamingEditEventEmitter {
   delta: (value: { messageId: string; delta: string }) => void
   end: (value: { messageId: string; committedChars: number; cancelled?: boolean }) => void
 }
+
 export type CompletedDocumentMutation =
   | { kind: 'insert_text'; insertedChars: number }
   | { kind: 'insert_paragraph_break' }
@@ -324,15 +119,14 @@ interface ActiveStreamingEdit {
   mode: AgentRunMode
   contentFormat: ContentFormat
   insertAnchorBytes?: Uint8Array
-  rewriteStartBytes?: Uint8Array
-  rewriteEndBytes?: Uint8Array
-  buffer: string
   committedChars: number
-  rewrittenText: string
-  markdownSource: string
-  renderedMarkdownDoc: PMNode | null
-  markdownState: StreamingMarkdownState | null
   deletedSelectionText?: string
+}
+
+const MARK_DELIMITER: Record<'bold' | 'italic' | 'code', string> = {
+  bold: '**',
+  italic: '*',
+  code: '`',
 }
 
 export class DocumentToolRuntime {
@@ -340,7 +134,7 @@ export class DocumentToolRuntime {
   private cursorAnchorBytes: Uint8Array | undefined
   private selectionStartBytes: Uint8Array | undefined
   private selectionEndBytes: Uint8Array | undefined
-  private readonly matches = new Map<string, SearchMatchHandle>()
+  private readonly matches = new Map<string, SearchMatchResult>()
   private activeEdit: ActiveStreamingEdit | null = null
   private streamingEditGenerator: StreamingEditContentGenerator | undefined
   private readonly completedMutations: CompletedDocumentMutation[] = []
@@ -363,7 +157,6 @@ export class DocumentToolRuntime {
     const runtime = new DocumentToolRuntime(session, input.signal)
     runtime.streamingEditGenerator = input.streamingEditGenerator
     await waitForProviderSync(session.provider, 20_000)
-    ensureMinimumBlock(session, runtime.origin)
     runtime.applyEditorContext(input.editorContext)
     runtime.ensureCursorAtEnd()
     session.setStatus('idle')
@@ -378,7 +171,6 @@ export class DocumentToolRuntime {
   }): DocumentToolRuntime {
     const runtime = new DocumentToolRuntime(input.session, input.signal)
     runtime.streamingEditGenerator = input.streamingEditGenerator
-    ensureMinimumBlock(input.session, runtime.origin)
     runtime.applyEditorContext(input.editorContext)
     runtime.ensureCursorAtEnd()
     input.session.setStatus('idle')
@@ -391,9 +183,54 @@ export class DocumentToolRuntime {
     }
   }
 
-  private getMapping(): ReturnType<typeof initProseMirrorDoc> {
-    return initProseMirrorDoc(this.session.fragment, schema)
+  // ── primitive text ops ────────────────────────────────────────────────
+
+  private text(): string {
+    return this.session.text.toString()
   }
+
+  private len(): number {
+    return this.session.text.length
+  }
+
+  private insertAt(offset: number, str: string): number {
+    if (!str) return offset
+    const at = clamp(offset, 0, this.len())
+    this.session.ydoc.transact(() => {
+      this.session.text.insert(at, str)
+    }, this.origin)
+    return at + str.length
+  }
+
+  private replaceRange(from: number, to: number, str: string): number {
+    const range = normalizeRange(clamp(from, 0, this.len()), clamp(to, 0, this.len()))
+    this.session.ydoc.transact(() => {
+      if (range.to > range.from) this.session.text.delete(range.from, range.to - range.from)
+      if (str) this.session.text.insert(range.from, str)
+    }, this.origin)
+    return range.from + str.length
+  }
+
+  private deleteRange(from: number, to: number): number {
+    const range = normalizeRange(clamp(from, 0, this.len()), clamp(to, 0, this.len()))
+    if (range.to > range.from) {
+      this.session.ydoc.transact(() => {
+        this.session.text.delete(range.from, range.to - range.from)
+      }, this.origin)
+    }
+    return range.from
+  }
+
+  private anchorAt(offset: number): Uint8Array {
+    return encodeAnchor(this.session.text, clamp(offset, 0, this.len()))
+  }
+
+  private resolve(bytes: Uint8Array | undefined): number | null {
+    if (!bytes) return null
+    return decodeAnchor(this.session.ydoc, bytes)
+  }
+
+  // ── cursor / selection ────────────────────────────────────────────────
 
   getCompletedMutations(): ReadonlyArray<CompletedDocumentMutation> {
     return this.completedMutations
@@ -404,58 +241,46 @@ export class DocumentToolRuntime {
   }
 
   private ensureCursorAtEnd(): void {
-    if (this.cursorAnchorBytes) {
-      const { meta } = this.getMapping()
-      const mapping = meta.mapping as ProsemirrorMapping
-      const current = resolveAnchor(this.session, mapping, this.cursorAnchorBytes)
-      if (current !== null) {
-        this.session.setCursorFromAbsolute(current, mapping)
-        return
-      }
+    const current = this.resolve(this.cursorAnchorBytes)
+    if (current !== null) {
+      this.session.setCursorFromIndex(current)
+      return
     }
-    const { doc, meta } = this.getMapping()
-    const end = TextSelection.atEnd(doc).from
-    this.cursorAnchorBytes = encodeAnchorAt(this.session, end, meta.mapping as ProsemirrorMapping)
-    this.session.setCursorFromAbsolute(end, meta.mapping as ProsemirrorMapping)
+    const end = this.len()
+    this.cursorAnchorBytes = this.anchorAt(end)
+    this.session.setCursorFromIndex(end)
   }
 
   private applyEditorContext(editorContext: EditorContextPayload | undefined): void {
     if (!editorContext) return
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
     if (editorContext.kind === 'selection') {
       const startBytes = decodeAnchorBase64(editorContext.anchor)
       const endBytes = decodeAnchorBase64(editorContext.head)
-      const start = resolveAnchor(this.session, mapping, startBytes)
-      const end = resolveAnchor(this.session, mapping, endBytes)
+      const start = this.resolve(startBytes)
+      const end = this.resolve(endBytes)
       if (start === null || end === null) return
       this.selectionStartBytes = startBytes
       this.selectionEndBytes = endBytes
       this.cursorAnchorBytes = endBytes
-      this.session.setCursorFromAbsolute(Math.max(start, end), mapping)
+      this.session.setCursorFromIndex(Math.max(start, end))
       return
     }
     const cursorBytes = decodeAnchorBase64(editorContext.anchor)
-    const cursorPos = resolveAnchor(this.session, mapping, cursorBytes)
+    const cursorPos = this.resolve(cursorBytes)
     if (cursorPos === null) return
     this.clearSelectionInternal()
     this.cursorAnchorBytes = cursorBytes
-    this.session.setCursorFromAbsolute(cursorPos, mapping)
+    this.session.setCursorFromIndex(cursorPos)
   }
 
-  private updateCursor(absPos: number): void {
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    this.cursorAnchorBytes = encodeAnchorAt(this.session, absPos, mapping)
-    this.session.setCursorFromAbsolute(absPos, mapping)
+  private updateCursor(offset: number): void {
+    this.cursorAnchorBytes = this.anchorAt(offset)
+    this.session.setCursorFromIndex(offset)
   }
 
   private resolveSelection(): { from: number; to: number } | null {
-    if (!this.selectionStartBytes || !this.selectionEndBytes) return null
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const from = resolveAnchor(this.session, mapping, this.selectionStartBytes)
-    const to = resolveAnchor(this.session, mapping, this.selectionEndBytes)
+    const from = this.resolve(this.selectionStartBytes)
+    const to = this.resolve(this.selectionEndBytes)
     if (from === null || to === null) return null
     return normalizeRange(from, to)
   }
@@ -465,20 +290,16 @@ export class DocumentToolRuntime {
     this.selectionEndBytes = undefined
   }
 
+  // ── reads ─────────────────────────────────────────────────────────────
+
   getDocumentSnapshot(
     maxChars: number = 6000,
     startChar: number = 0,
   ): { text: string; charCount: number; startChar: number; endChar: number } {
-    const { doc } = this.getMapping()
-    const text = doc.textBetween(0, doc.content.size, '\n\n', '\n')
-    const safeStart = Math.max(0, Math.min(startChar, text.length))
-    const safeEnd = Math.max(safeStart, Math.min(safeStart + maxChars, text.length))
-    return {
-      text: text.slice(safeStart, safeEnd),
-      charCount: text.length,
-      startChar: safeStart,
-      endChar: safeEnd,
-    }
+    const text = this.text()
+    const safeStart = clamp(startChar, 0, text.length)
+    const safeEnd = clamp(safeStart + maxChars, safeStart, text.length)
+    return { text: text.slice(safeStart, safeEnd), charCount: text.length, startChar: safeStart, endChar: safeEnd }
   }
 
   getSelectionSnapshot(
@@ -487,20 +308,13 @@ export class DocumentToolRuntime {
   ): { text: string; from: number; to: number; before: string; after: string } | null {
     const selection = this.resolveSelection()
     if (!selection) return null
-    const { doc } = this.getMapping()
-    const safeBefore = Math.max(0, maxCharsBefore)
-    const safeAfter = Math.max(0, maxCharsAfter)
+    const s = this.text()
     return {
-      text: doc.textBetween(selection.from, selection.to, '\n\n', '\n'),
+      text: s.slice(selection.from, selection.to),
       from: selection.from,
       to: selection.to,
-      before: doc.textBetween(Math.max(0, selection.from - safeBefore), selection.from, '\n\n', '\n'),
-      after: doc.textBetween(
-        selection.to,
-        Math.min(doc.content.size, selection.to + safeAfter),
-        '\n\n',
-        '\n',
-      ),
+      before: s.slice(Math.max(0, selection.from - maxCharsBefore), selection.from),
+      after: s.slice(selection.to, Math.min(s.length, selection.to + maxCharsAfter)),
     }
   }
 
@@ -509,129 +323,84 @@ export class DocumentToolRuntime {
     maxCharsAfter: number = 120,
   ): { before: string; after: string } | null {
     this.ensureCursorAtEnd()
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const pos = resolveAnchor(this.session, mapping, this.cursorAnchorBytes)
+    const pos = this.resolve(this.cursorAnchorBytes)
     if (pos === null) return null
-    const safeBefore = Math.max(0, maxCharsBefore)
-    const safeAfter = Math.max(0, maxCharsAfter)
+    const s = this.text()
     return {
-      before: doc.textBetween(Math.max(0, pos - safeBefore), pos, '\n\n', '\n'),
-      after: doc.textBetween(pos, Math.min(doc.content.size, pos + safeAfter), '\n\n', '\n'),
+      before: s.slice(Math.max(0, pos - maxCharsBefore), pos),
+      after: s.slice(pos, Math.min(s.length, pos + maxCharsAfter)),
     }
   }
 
   searchText(query: string, maxResults: number = 8): SearchMatchResult[] {
     const trimmed = query.trim()
     if (!trimmed) return []
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const matches: SearchMatchResult[] = []
-
-    doc.descendants((node, pos) => {
-      if (!node.isTextblock || matches.length >= maxResults) {
-        return matches.length < maxResults
+    const s = this.text()
+    const results: SearchMatchResult[] = []
+    let fromIndex = 0
+    while (results.length < maxResults) {
+      const found = s.indexOf(trimmed, fromIndex)
+      if (found < 0) break
+      const handle: SearchMatchResult = {
+        matchId: crypto.randomUUID(),
+        text: trimmed,
+        ...preview(s, found, trimmed.length),
+        startAnchorB64: bytesToBase64Str(this.anchorAt(found)),
+        endAnchorB64: bytesToBase64Str(this.anchorAt(found + trimmed.length)),
       }
-      const text = node.textContent
-      if (!text) return true
-      let fromIndex = 0
-      while (fromIndex < text.length && matches.length < maxResults) {
-        const found = text.indexOf(trimmed, fromIndex)
-        if (found < 0) break
-        const startAbs = clampTextPos(doc, pos + 1 + found)
-        const endAbs = clampTextPos(doc, startAbs + trimmed.length)
-        const handle: SearchMatchHandle = {
-          matchId: crypto.randomUUID(),
-          text: trimmed,
-          ...preview(text, found, trimmed.length),
-          startAnchorB64: bytesToBase64(encodeAnchorAt(this.session, startAbs, mapping)),
-          endAnchorB64: bytesToBase64(encodeAnchorAt(this.session, endAbs, mapping)),
-        }
-        this.matches.set(handle.matchId, handle)
-        matches.push(handle)
-        fromIndex = found + Math.max(1, trimmed.length)
-      }
-      return matches.length < maxResults
-    })
-
-    return matches
+      this.matches.set(handle.matchId, handle)
+      results.push(handle)
+      fromIndex = found + Math.max(1, trimmed.length)
+    }
+    return results
   }
+
+  // ── cursor placement / selection ──────────────────────────────────────
 
   placeCursor(matchId: string, edge: 'start' | 'end' = 'start'): { ok: true; cursorAnchorB64: string } {
     const handle = this.matches.get(matchId)
-    if (!handle) {
-      throw new Error(`Unknown matchId: ${matchId}`)
-    }
-    const next = decodeAnchorBase64(edge === 'start' ? handle.startAnchorB64 : handle.endAnchorB64)
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const absPos = resolveAnchor(this.session, mapping, next)
-    if (absPos === null) {
-      throw new Error('Could not resolve cursor target')
-    }
-    this.cursorAnchorBytes = next
+    if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
+    const bytes = decodeAnchorBase64(edge === 'start' ? handle.startAnchorB64 : handle.endAnchorB64)
+    const pos = this.resolve(bytes)
+    if (pos === null) throw new Error('Could not resolve cursor target')
+    this.cursorAnchorBytes = bytes
     this.clearSelectionInternal()
-    this.session.setCursorFromAbsolute(absPos, mapping)
-    return { ok: true, cursorAnchorB64: bytesToBase64(next) }
+    this.session.setCursorFromIndex(pos)
+    return { ok: true, cursorAnchorB64: bytesToBase64Str(bytes) }
   }
 
   placeCursorAtDocumentBoundary(
     boundary: 'start' | 'end',
   ): { ok: true; cursorAnchorB64: string; boundary: 'start' | 'end' } {
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const absPos =
-      boundary === 'start' ? TextSelection.atStart(doc).from : TextSelection.atEnd(doc).from
-    const next = encodeAnchorAt(this.session, absPos, mapping)
-    this.cursorAnchorBytes = next
+    const pos = boundary === 'start' ? 0 : this.len()
+    this.cursorAnchorBytes = this.anchorAt(pos)
     this.clearSelectionInternal()
-    this.session.setCursorFromAbsolute(absPos, mapping)
-    return {
-      ok: true,
-      cursorAnchorB64: bytesToBase64(next),
-      boundary,
-    }
+    this.session.setCursorFromIndex(pos)
+    return { ok: true, cursorAnchorB64: bytesToBase64Str(this.cursorAnchorBytes), boundary }
   }
 
   selectText(matchId: string): { ok: true; selectedText: string } {
     const handle = this.matches.get(matchId)
-    if (!handle) {
-      throw new Error(`Unknown matchId: ${matchId}`)
-    }
+    if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
     this.selectionStartBytes = decodeAnchorBase64(handle.startAnchorB64)
     this.selectionEndBytes = decodeAnchorBase64(handle.endAnchorB64)
     this.cursorAnchorBytes = this.selectionEndBytes
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const absPos = resolveAnchor(this.session, mapping, this.selectionEndBytes)
-    if (absPos !== null) {
-      this.session.setCursorFromAbsolute(absPos, mapping)
-    }
+    const pos = this.resolve(this.selectionEndBytes)
+    if (pos !== null) this.session.setCursorFromIndex(pos)
     return { ok: true, selectedText: handle.text }
   }
 
   selectCurrentBlock(): { ok: true; selectedText: string } {
     this.ensureCursorAtEnd()
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const cursorPos = resolveAnchor(this.session, mapping, this.cursorAnchorBytes)
-    if (cursorPos === null) {
-      throw new Error('Could not resolve cursor position')
-    }
-    const $pos = doc.resolve(clampTextPos(doc, cursorPos))
-    if (!$pos.parent.isTextblock) {
-      throw new Error('Current cursor is not inside a text block')
-    }
-    const from = $pos.start()
-    const to = $pos.end()
-    this.selectionStartBytes = encodeAnchorAt(this.session, from, mapping)
-    this.selectionEndBytes = encodeAnchorAt(this.session, to, mapping)
+    const cursorPos = this.resolve(this.cursorAnchorBytes)
+    if (cursorPos === null) throw new Error('Could not resolve cursor position')
+    const s = this.text()
+    const { start, end } = lineBounds(s, cursorPos, cursorPos)
+    this.selectionStartBytes = this.anchorAt(start)
+    this.selectionEndBytes = this.anchorAt(end)
     this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromAbsolute(to, mapping)
-    return {
-      ok: true,
-      selectedText: doc.textBetween(from, to, '\n\n', '\n'),
-    }
+    this.session.setCursorFromIndex(end)
+    return { ok: true, selectedText: s.slice(start, end) }
   }
 
   selectBetweenMatches(
@@ -642,27 +411,21 @@ export class DocumentToolRuntime {
   ): { ok: true } {
     const startHandle = this.matches.get(startMatchId)
     const endHandle = this.matches.get(endMatchId)
-    if (!startHandle || !endHandle) {
-      throw new Error('Unknown matchId in select_between_matches')
-    }
+    if (!startHandle || !endHandle) throw new Error('Unknown matchId in select_between_matches')
     const startBytes = decodeAnchorBase64(
       startEdge === 'start' ? startHandle.startAnchorB64 : startHandle.endAnchorB64,
     )
     const endBytes = decodeAnchorBase64(
       endEdge === 'start' ? endHandle.startAnchorB64 : endHandle.endAnchorB64,
     )
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const startAbs = resolveAnchor(this.session, mapping, startBytes)
-    const endAbs = resolveAnchor(this.session, mapping, endBytes)
-    if (startAbs === null || endAbs === null) {
-      throw new Error('Could not resolve selection range')
-    }
+    const startAbs = this.resolve(startBytes)
+    const endAbs = this.resolve(endBytes)
+    if (startAbs === null || endAbs === null) throw new Error('Could not resolve selection range')
     const range = normalizeRange(startAbs, endAbs)
-    this.selectionStartBytes = encodeAnchorAt(this.session, range.from, mapping)
-    this.selectionEndBytes = encodeAnchorAt(this.session, range.to, mapping)
+    this.selectionStartBytes = this.anchorAt(range.from)
+    this.selectionEndBytes = this.anchorAt(range.to)
     this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromAbsolute(range.to, mapping)
+    this.session.setCursorFromIndex(range.to)
     return { ok: true }
   }
 
@@ -672,44 +435,17 @@ export class DocumentToolRuntime {
     return { ok: true }
   }
 
+  // ── edits ─────────────────────────────────────────────────────────────
+
   insertParagraphBreak(): { ok: true } {
     this.throwIfAborted()
     this.ensureCursorAtEnd()
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const cursorPos = resolveAnchor(this.session, mapping, this.cursorAnchorBytes)
-    if (cursorPos === null) {
-      throw new Error('Could not resolve cursor position')
-    }
-
-    const state = EditorState.create({
-      doc,
-      schema,
-      selection: TextSelection.create(doc, cursorPos),
-    })
-    let nextDoc: PMNode | null = null
-    let nextPos: number | null = null
-    let didChange = false
-    const dispatch = (tr: EditorState['tr']) => {
-      tr.setMeta('addToHistory', false)
-      didChange = tr.docChanged
-      nextDoc = tr.doc
-      nextPos = tr.selection.to
-    }
-
-    splitBlock(state, dispatch)
-
-    if (!didChange || !nextDoc || nextPos === null) {
-      return { ok: true }
-    }
-
-    applyPmRootToY(this.session, nextDoc, meta, this.origin)
+    const pos = this.resolve(this.cursorAnchorBytes)
+    if (pos === null) throw new Error('Could not resolve cursor position')
+    const endPos = this.insertAt(pos, '\n\n')
     this.clearSelectionInternal()
     this.completedMutations.push({ kind: 'insert_paragraph_break' })
-    const { meta: nextMeta } = this.getMapping()
-    const nextMapping = nextMeta.mapping as ProsemirrorMapping
-    this.cursorAnchorBytes = encodeAnchorAt(this.session, nextPos, nextMapping)
-    this.session.setCursorFromAbsolute(nextPos, nextMapping)
+    this.updateCursor(endPos)
     return { ok: true }
   }
 
@@ -721,180 +457,98 @@ export class DocumentToolRuntime {
   }): { ok: true; kind: FormatKind; format: FormatName; action: FormatAction } {
     this.throwIfAborted()
     const selection = this.resolveSelection()
-    if (!selection) {
-      throw new Error('Formatting requires an active selection')
-    }
-
+    if (!selection) throw new Error('Formatting requires an active selection')
     const action = input.action ?? (input.kind === 'mark' ? 'toggle' : 'set')
-    const { doc, meta } = this.getMapping()
-    const state = EditorState.create({
-      doc,
-      schema,
-      selection: TextSelection.create(doc, selection.from, selection.to),
-    })
-    let appliedTr: EditorState['tr'] | null = null
-    const dispatch = (tr: EditorState['tr']) => {
-      tr.setMeta('addToHistory', false)
-      appliedTr = tr
-    }
+    const s = this.text()
 
     if (input.kind === 'mark') {
-      const markType =
-        input.format === 'bold'
-          ? schema.marks.strong
-          : input.format === 'italic'
-            ? schema.marks.em
-            : input.format === 'code'
-              ? schema.marks.code
-              : null
-      if (!markType) {
-        throw new Error(`Unsupported mark format: ${input.format}`)
-      }
-      const hasMark = state.doc.rangeHasMark(state.selection.from, state.selection.to, markType)
-      const shouldAdd =
-        action === 'add' || action === 'set' || (action === 'toggle' && !hasMark)
-      const tr = state.tr
-      tr.setMeta('addToHistory', false)
-      if (shouldAdd) {
-        tr.addMark(state.selection.from, state.selection.to, markType.create())
-      } else {
-        tr.removeMark(state.selection.from, state.selection.to, markType)
-      }
-      appliedTr = tr
-    } else {
-      switch (input.format) {
-        case 'paragraph':
-          setBlockType(schema.nodes.paragraph)(state, dispatch)
-          break
-        case 'heading':
-          setBlockType(schema.nodes.heading, { level: input.level ?? 2 })(state, dispatch)
-          break
-        case 'bullet_list': {
-          const listItem = schema.nodes.list_item
-          const listNode = schema.nodes.bullet_list
-          if (!listItem || !listNode) {
-            throw new Error('Bullet list formatting is not available in this schema')
-          }
-          const active = isNodeActive(state, listNode)
-          if (action === 'remove' || (action === 'toggle' && active)) {
-            liftListItem(listItem)(state, dispatch)
-          } else {
-            wrapInList(listNode)(state, dispatch)
-          }
-          break
-        }
-        case 'ordered_list': {
-          const listItem = schema.nodes.list_item
-          const listNode = schema.nodes.ordered_list
-          if (!listItem || !listNode) {
-            throw new Error('Ordered list formatting is not available in this schema')
-          }
-          const active = isNodeActive(state, listNode)
-          if (action === 'remove' || (action === 'toggle' && active)) {
-            liftListItem(listItem)(state, dispatch)
-          } else {
-            wrapInList(listNode)(state, dispatch)
-          }
-          break
-        }
-        default:
-          throw new Error(`Unsupported block format: ${input.format}`)
-      }
-    }
-
-    if (!appliedTr || !appliedTr.docChanged) {
+      const delim = MARK_DELIMITER[input.format as 'bold' | 'italic' | 'code']
+      if (!delim) throw new Error(`Unsupported mark format: ${input.format}`)
+      const inner = s.slice(selection.from, selection.to)
+      const alreadyWrapped = inner.startsWith(delim) && inner.endsWith(delim) && inner.length >= delim.length * 2
+      const shouldRemove = action === 'remove' || (action === 'toggle' && alreadyWrapped)
+      const next = shouldRemove
+        ? inner.slice(delim.length, inner.length - delim.length)
+        : `${delim}${inner}${delim}`
+      const endPos = this.replaceRange(selection.from, selection.to, next)
+      this.selectionStartBytes = this.anchorAt(selection.from)
+      this.selectionEndBytes = this.anchorAt(endPos)
+      this.cursorAnchorBytes = this.selectionEndBytes
+      this.session.setCursorFromIndex(endPos)
+      this.completedMutations.push({ kind: 'set_format', formatKind: input.kind, format: input.format, action })
       return { ok: true, kind: input.kind, format: input.format, action }
     }
 
-    applyPmRootToY(this.session, appliedTr.doc, meta, this.origin)
-    this.completedMutations.push({
-      kind: 'set_format',
-      formatKind: input.kind,
-      format: input.format,
-      action,
+    // Block formatting: rewrite the whole lines the selection touches.
+    const bounds = lineBounds(s, selection.from, selection.to)
+    const block = s.slice(bounds.start, bounds.end)
+    const lines = block.split('\n')
+    const transformed = lines.map((line, i) => {
+      const bare = stripLeadingBlockMarkers(line)
+      switch (input.format) {
+        case 'paragraph':
+          return bare
+        case 'heading':
+          return `${'#'.repeat(clamp(input.level ?? 2, 1, 6))} ${bare}`
+        case 'bullet_list':
+          return `- ${bare}`
+        case 'ordered_list':
+          return `${i + 1}. ${bare}`
+        default:
+          throw new Error(`Unsupported block format: ${input.format}`)
+      }
     })
-    const nextFrom = appliedTr.selection.from
-    const nextTo = appliedTr.selection.to
-    const { meta: nextMeta } = this.getMapping()
-    const mapping = nextMeta.mapping as ProsemirrorMapping
-    this.selectionStartBytes = encodeAnchorAt(this.session, nextFrom, mapping)
-    this.selectionEndBytes = encodeAnchorAt(this.session, nextTo, mapping)
+    const next = transformed.join('\n')
+    const endPos = this.replaceRange(bounds.start, bounds.end, next)
+    this.selectionStartBytes = this.anchorAt(bounds.start)
+    this.selectionEndBytes = this.anchorAt(endPos)
     this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromAbsolute(nextTo, mapping)
+    this.session.setCursorFromIndex(endPos)
+    this.completedMutations.push({ kind: 'set_format', formatKind: input.kind, format: input.format, action })
     return { ok: true, kind: input.kind, format: input.format, action }
   }
 
   insertText(
     text: string,
-    contentFormat: ContentFormat = 'plain_text',
+    _contentFormat: ContentFormat = 'markdown',
   ): { ok: true; insertedChars: number } {
     this.throwIfAborted()
     const selection = this.resolveSelection()
     let endPos: number
-    const markdownFragment =
-      contentFormat === 'markdown' ? parseInlineMarkdownFragment(text) : null
     if (selection) {
-      endPos =
-        markdownFragment !== null
-          ? replaceRangeWithFragment(
-              this.session,
-              this.origin,
-              selection.from,
-              selection.to,
-              markdownFragment,
-            ).endPos
-          : replaceRange(this.session, this.origin, selection.from, selection.to, text)
+      endPos = this.replaceRange(selection.from, selection.to, text)
       this.clearSelectionInternal()
     } else {
       this.ensureCursorAtEnd()
-      const { meta } = this.getMapping()
-      const mapping = meta.mapping as ProsemirrorMapping
-      const pos = resolveAnchor(this.session, mapping, this.cursorAnchorBytes)
-      if (pos === null) {
-        throw new Error('Could not resolve cursor position')
-      }
-      endPos =
-        markdownFragment !== null
-          ? replaceRangeWithFragment(this.session, this.origin, pos, pos, markdownFragment).endPos
-          : insertAt(this.session, this.origin, text, pos)
+      const pos = this.resolve(this.cursorAnchorBytes)
+      if (pos === null) throw new Error('Could not resolve cursor position')
+      endPos = this.insertAt(pos, text)
     }
     this.updateCursor(endPos)
-    if (text.length > 0) {
-      this.completedMutations.push({ kind: 'insert_text', insertedChars: text.length })
-    }
+    if (text.length > 0) this.completedMutations.push({ kind: 'insert_text', insertedChars: text.length })
     return { ok: true, insertedChars: text.length }
   }
 
   replaceMatches(
     matchIds: string[],
     text: string,
-    contentFormat: ContentFormat = 'plain_text',
+    _contentFormat: ContentFormat = 'markdown',
   ): { ok: true; replacedCount: number; insertedChars: number } {
     this.throwIfAborted()
     const uniqueMatchIds = Array.from(new Set(matchIds))
-    if (uniqueMatchIds.length === 0) {
-      return { ok: true, replacedCount: 0, insertedChars: text.length }
-    }
-    const markdownFragment =
-      contentFormat === 'markdown' ? parseInlineMarkdownFragment(text) : null
+    if (uniqueMatchIds.length === 0) return { ok: true, replacedCount: 0, insertedChars: text.length }
 
-    const { meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
     const ranges = uniqueMatchIds.map((matchId) => {
       const handle = this.matches.get(matchId)
-      if (!handle) {
-        throw new Error(`Unknown matchId: ${matchId}`)
-      }
-      const start = resolveAnchor(this.session, mapping, decodeAnchorBase64(handle.startAnchorB64))
-      const end = resolveAnchor(this.session, mapping, decodeAnchorBase64(handle.endAnchorB64))
-      if (start === null || end === null) {
-        throw new Error(`Could not resolve matchId: ${matchId}`)
-      }
+      if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
+      const start = this.resolve(decodeAnchorBase64(handle.startAnchorB64))
+      const end = this.resolve(decodeAnchorBase64(handle.endAnchorB64))
+      if (start === null || end === null) throw new Error(`Could not resolve matchId: ${matchId}`)
       return normalizeRange(start, end)
     })
 
+    // Apply right-to-left so earlier offsets remain valid.
     ranges.sort((a, b) => (a.from === b.from ? b.to - a.to : b.from - a.from))
-
     for (let i = 1; i < ranges.length; i += 1) {
       if (ranges[i - 1]!.from < ranges[i]!.to) {
         throw new Error('replace_matches received overlapping match ranges')
@@ -903,16 +557,7 @@ export class DocumentToolRuntime {
 
     let cursorPos = ranges[ranges.length - 1]!.from
     for (const range of ranges) {
-      cursorPos =
-        markdownFragment !== null
-          ? replaceRangeWithFragment(
-              this.session,
-              this.origin,
-              range.from,
-              range.to,
-              markdownFragment,
-            ).endPos
-          : replaceRange(this.session, this.origin, range.from, range.to, text)
+      cursorPos = this.replaceRange(range.from, range.to, text)
     }
 
     this.clearSelectionInternal()
@@ -928,71 +573,57 @@ export class DocumentToolRuntime {
   deleteSelection(): { ok: true; deleted: boolean } {
     this.throwIfAborted()
     const selection = this.resolveSelection()
-    if (!selection) {
-      return { ok: true, deleted: false }
-    }
-    const endPos = deleteRange(this.session, this.origin, selection.from, selection.to)
+    if (!selection) return { ok: true, deleted: false }
+    const endPos = this.deleteRange(selection.from, selection.to)
     this.clearSelectionInternal()
     this.updateCursor(endPos)
     this.completedMutations.push({ kind: 'delete_selection' })
     return { ok: true, deleted: true }
   }
 
+  // ── streaming edits ───────────────────────────────────────────────────
+
   startStreamingEdit(
     mode: AgentRunMode,
-    contentFormat: ContentFormat = 'plain_text',
+    contentFormat: ContentFormat = 'markdown',
   ): { ok: true; editSessionId: string; mode: AgentRunMode; contentFormat: ContentFormat } {
     this.throwIfAborted()
-    if (this.activeEdit) {
-      throw new Error('A streaming edit is already active')
-    }
-    let insertAnchorBytes: Uint8Array | undefined
-    let rewriteStartBytes: Uint8Array | undefined
-    let rewriteEndBytes: Uint8Array | undefined
+    if (this.activeEdit) throw new Error('A streaming edit is already active')
+    let insertOffset: number
     let deletedSelectionText: string | undefined
 
     if (mode === 'rewrite') {
       const selection = this.resolveSelection()
-      if (!selection) {
-        throw new Error('Rewrite requires an active selection')
-      }
-      const { doc } = this.getMapping()
-      deletedSelectionText = doc.textBetween(selection.from, selection.to, '\n\n', '\n')
-      const deletePos = deleteRange(this.session, this.origin, selection.from, selection.to)
-      const { meta } = this.getMapping()
-      const mapping = meta.mapping as ProsemirrorMapping
-      insertAnchorBytes = encodeAnchorAt(this.session, deletePos, mapping)
-      rewriteStartBytes = encodeAnchorAt(this.session, deletePos, mapping)
-      rewriteEndBytes = rewriteStartBytes
-      this.cursorAnchorBytes = insertAnchorBytes
+      if (!selection) throw new Error('Rewrite requires an active selection')
+      deletedSelectionText = this.text().slice(selection.from, selection.to)
+      insertOffset = this.deleteRange(selection.from, selection.to)
       this.clearSelectionInternal()
-      this.session.setCursorFromAbsolute(deletePos, mapping)
     } else if (mode === 'continue') {
-      const { doc, meta } = this.getMapping()
-      const end = TextSelection.atEnd(doc).from
-      insertAnchorBytes = encodeAnchorAt(this.session, end, meta.mapping as ProsemirrorMapping)
-      this.cursorAnchorBytes = insertAnchorBytes
-      this.session.setCursorFromAbsolute(end, meta.mapping as ProsemirrorMapping)
-      this.clearSelectionInternal()
+      insertOffset = this.len()
     } else {
       this.ensureCursorAtEnd()
-      insertAnchorBytes = this.cursorAnchorBytes
+      const pos = this.resolve(this.cursorAnchorBytes)
+      insertOffset = pos ?? this.len()
       this.clearSelectionInternal()
     }
 
+    // Separate appended prose from preceding content with a blank line.
+    if ((mode === 'continue' || mode === 'insert') && insertOffset > 0) {
+      const before = this.text().slice(0, insertOffset)
+      if (!before.endsWith('\n\n')) {
+        const sep = before.endsWith('\n') ? '\n' : '\n\n'
+        insertOffset = this.insertAt(insertOffset, sep)
+      }
+    }
+
+    this.cursorAnchorBytes = this.anchorAt(insertOffset)
+    this.session.setCursorFromIndex(insertOffset)
     this.activeEdit = {
       id: crypto.randomUUID(),
       mode,
       contentFormat,
-      insertAnchorBytes,
-      rewriteStartBytes,
-      rewriteEndBytes,
-      buffer: '',
+      insertAnchorBytes: this.anchorAt(insertOffset),
       committedChars: 0,
-      rewrittenText: '',
-      markdownSource: '',
-      renderedMarkdownDoc: null,
-      markdownState: contentFormat === 'markdown' ? createStreamingMarkdownState() : null,
       deletedSelectionText,
     }
     this.session.setStatus('thinking')
@@ -1006,30 +637,19 @@ export class DocumentToolRuntime {
 
   getActiveStreamingEditInfo(): { mode: AgentRunMode; contentFormat: ContentFormat } | null {
     if (!this.activeEdit) return null
-    return {
-      mode: this.activeEdit.mode,
-      contentFormat: this.activeEdit.contentFormat,
-    }
+    return { mode: this.activeEdit.mode, contentFormat: this.activeEdit.contentFormat }
   }
 
   hasStreamingEditGenerator(): boolean {
     return this.streamingEditGenerator !== undefined
   }
 
-  /**
-   * Drive the open streaming edit to completion by pulling prose from the bound
-   * content generator and committing it into the Yjs document. This removes the
-   * dependency on the model volunteering a follow-up assistant text turn, which
-   * reasoning models do not reliably do (see bug-mqiof6o8-1og6).
-   */
   async driveStreamingEditContent(
     emitter: StreamingEditEventEmitter,
   ): Promise<{ ok: true; committedChars: number; cancelled?: boolean }> {
     const edit = this.activeEdit
     const generator = this.streamingEditGenerator
-    if (!edit || !generator) {
-      return { ok: true, committedChars: 0 }
-    }
+    if (!edit || !generator) return { ok: true, committedChars: 0 }
     const messageId = edit.id
     const { mode, contentFormat } = edit
     emitter.start({ messageId, mode, contentFormat })
@@ -1063,206 +683,27 @@ export class DocumentToolRuntime {
     return result
   }
 
-  private insertMarkdownDocument(
-    edit: ActiveStreamingEdit,
-  ): { endPos: number; nextInsertAnchorBytes?: Uint8Array; insertedChars: number } | null {
-    if (!edit.markdownState) {
-      return null
-    }
-    const parsedDoc = streamStateToProsemirrorDoc(edit.markdownState)
-    if (isEffectivelyEmptyMarkdownDoc(parsedDoc)) {
-      return null
-    }
-    const diff = diffMarkdownDocsForAppend(edit.renderedMarkdownDoc, parsedDoc)
-    if (!diff.canApply) {
-      return null
-    }
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const pos = resolveAnchor(this.session, mapping, edit.insertAnchorBytes)
-    if (pos === null) return null
-
-    if (edit.renderedMarkdownDoc === null && isEmptyBootstrapDoc(doc)) {
-      const inserted = replaceRangeWithFragment(this.session, this.origin, 0, doc.content.size, parsedDoc.content)
-      edit.renderedMarkdownDoc = parsedDoc
-      const { meta: nextMeta } = this.getMapping()
-      const nextMapping = nextMeta.mapping as ProsemirrorMapping
-      return {
-        endPos: inserted.endPos,
-        nextInsertAnchorBytes: encodeAnchorAt(this.session, inserted.tailTextPos, nextMapping),
-        insertedChars: edit.markdownSource.length,
-      }
-    }
-
-    let currentPos = pos
-    let insertedChars = 0
-    let changed = false
-    let nextAnchorPos = pos
-
-    if (diff.appendToLastBlock && diff.appendToLastBlock.fragment.size > 0) {
-      const latestDoc = changed ? this.getMapping().doc : doc
-      const targetPos =
-        insertionPosAtEndOfNode(latestDoc, diff.appendToLastBlock.path) ?? currentPos
-      const inserted = replaceRangeWithFragment(
-        this.session,
-        this.origin,
-        targetPos,
-        targetPos,
-        diff.appendToLastBlock.fragment,
-      )
-      currentPos = inserted.endPos
-      nextAnchorPos = inserted.tailTextPos
-      changed = true
-    }
-
-    const appendedBlocks = diff.appendedBlocks?.nodes ?? []
-    if (appendedBlocks.length > 0) {
-      const latestDoc = changed ? this.getMapping().doc : doc
-      const blockPos =
-        edit.renderedMarkdownDoc === null
-          ? resolveBlockInsertPos(latestDoc, currentPos)
-          : insertionPosAtEndOfNode(latestDoc, diff.appendedBlocks?.path ?? []) ??
-            resolveBlockInsertPos(latestDoc, currentPos)
-      const inserted = replaceRangeWithFragment(
-        this.session,
-        this.origin,
-        blockPos,
-        blockPos,
-        PMFragment.fromArray(appendedBlocks),
-      )
-      currentPos = inserted.endPos
-      nextAnchorPos = inserted.tailTextPos
-      changed = true
-    }
-
-    if (!changed) {
-      return {
-        endPos: currentPos,
-        nextInsertAnchorBytes: edit.insertAnchorBytes,
-        insertedChars: 0,
-      }
-    }
-
-    insertedChars = edit.markdownSource.length
-    edit.renderedMarkdownDoc = parsedDoc
-    const { meta: nextMeta } = this.getMapping()
-    const nextMapping = nextMeta.mapping as ProsemirrorMapping
-    return {
-      endPos: currentPos,
-      nextInsertAnchorBytes: encodeAnchorAt(this.session, nextAnchorPos, nextMapping),
-      insertedChars,
-    }
-  }
-
-  private insertPlainTextChunk(
-    edit: ActiveStreamingEdit,
-    text: string,
-  ): { endPos: number; nextInsertAnchorBytes: Uint8Array } | null {
-    const { doc, meta } = this.getMapping()
-    const mapping = meta.mapping as ProsemirrorMapping
-    const pos = resolveAnchor(this.session, mapping, edit.insertAnchorBytes)
-    if (pos === null) return null
-
-    if (edit.committedChars === 0 && edit.mode !== 'rewrite' && isEmptyBootstrapDoc(doc)) {
-      const paragraph = schema.nodes.paragraph.create(
-        null,
-        text.length > 0 ? schema.text(text) : undefined,
-      )
-      const inserted = replaceRangeWithFragment(
-        this.session,
-        this.origin,
-        0,
-        doc.content.size,
-        PMFragment.from(paragraph),
-      )
-      const { meta: nextMeta } = this.getMapping()
-      const nextMapping = nextMeta.mapping as ProsemirrorMapping
-      return {
-        endPos: inserted.tailTextPos,
-        nextInsertAnchorBytes: encodeAnchorAt(this.session, inserted.tailTextPos, nextMapping),
-      }
-    }
-
-    const endPos = insertAt(this.session, this.origin, text, pos)
-    const { meta: nextMeta } = this.getMapping()
-    return {
-      endPos,
-      nextInsertAnchorBytes: encodeAnchorAt(this.session, endPos, nextMeta.mapping as ProsemirrorMapping),
-    }
-  }
-
+  /** Append a streamed markdown delta into the document at the live insert anchor. */
   async pushStreamingText(delta: string): Promise<void> {
     this.throwIfAborted()
     const edit = this.activeEdit
     if (!edit || delta.length === 0) return
-    if (edit.contentFormat === 'markdown') {
-      if (!edit.markdownState) {
-        edit.markdownState = createStreamingMarkdownState()
-      }
-      writeStreamingMarkdown(edit.markdownState, delta)
-      edit.markdownSource += delta
-      edit.buffer = ''
-      this.session.setTail(null)
-      this.session.setStatus('composing')
-      if (edit.mode === 'rewrite') {
-        edit.rewrittenText = edit.markdownSource
-        edit.committedChars = edit.markdownSource.length
-      }
-      const inserted = this.insertMarkdownDocument(edit)
-      if (!inserted) return
-      edit.committedChars = inserted.insertedChars
-      edit.insertAnchorBytes = inserted.nextInsertAnchorBytes
-      this.updateCursor(inserted.endPos)
-      return
-    }
-    edit.buffer += delta
-    const { stable, rest } = takeStablePrefix(edit.buffer)
-    edit.buffer = rest
-    this.session.setTail(edit.buffer.length > 0 ? edit.buffer : null)
-    if (stable.length === 0) return
-
+    const pos = this.resolve(edit.insertAnchorBytes) ?? this.len()
+    const endPos = this.insertAt(pos, delta)
+    edit.insertAnchorBytes = this.anchorAt(endPos)
+    edit.committedChars += delta.length
     this.session.setStatus('composing')
-    const inserted = this.insertPlainTextChunk(edit, stable)
-    if (!inserted) return
-    edit.committedChars += stable.length
-    edit.insertAnchorBytes = inserted.nextInsertAnchorBytes
-    this.updateCursor(inserted.endPos)
+    this.updateCursor(endPos)
   }
 
   stopStreamingEdit(cancelled: boolean = false): { ok: true; committedChars: number; cancelled?: boolean } {
     const edit = this.activeEdit
-    if (!edit) {
-      return { ok: true, committedChars: 0, cancelled }
-    }
+    if (!edit) return { ok: true, committedChars: 0, cancelled }
 
-    if (!cancelled && edit.contentFormat === 'markdown' && edit.markdownState) {
-      endStreamingMarkdown(edit.markdownState)
-    }
-
-    if (!cancelled && edit.contentFormat === 'markdown') {
-      const inserted = this.insertMarkdownDocument(edit)
-      if (inserted) {
-        edit.committedChars = inserted.insertedChars
-        edit.insertAnchorBytes = inserted.nextInsertAnchorBytes
-        this.updateCursor(inserted.endPos)
-      }
-    } else if (!cancelled && edit.buffer.length > 0) {
-      const inserted = this.insertPlainTextChunk(edit, edit.buffer)
-      if (inserted) {
-        edit.committedChars += edit.buffer.length
-        edit.insertAnchorBytes = inserted.nextInsertAnchorBytes
-        this.updateCursor(inserted.endPos)
-      }
-    }
-
+    // On cancel with nothing written, restore a rewrite's original passage.
     if (cancelled && edit.committedChars === 0 && edit.deletedSelectionText && edit.insertAnchorBytes) {
-      const { meta } = this.getMapping()
-      const mapping = meta.mapping as ProsemirrorMapping
-      const pos = resolveAnchor(this.session, mapping, edit.insertAnchorBytes)
-      if (pos !== null) {
-        const endPos = insertAt(this.session, this.origin, edit.deletedSelectionText, pos)
-        this.updateCursor(endPos)
-      }
+      const pos = this.resolve(edit.insertAnchorBytes)
+      if (pos !== null) this.updateCursor(this.insertAt(pos, edit.deletedSelectionText))
     }
 
     const result = {

@@ -48,6 +48,26 @@ export function sanitizeDocKey(docKey: string): string {
   return docKey
 }
 
+/** Slugify a workspace name for safe use in docKeys and URLs. */
+export function slugifyWorkspace(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'workspace'
+}
+
+/** docKey for a workspace's shared notes index (a Yjs doc holding the note list). */
+export function workspaceIndexDocKey(workspace: string): string {
+  return `ws-${slugifyWorkspace(workspace)}-index`
+}
+
+/** docKey for an individual note within a workspace. */
+export function noteDocKey(workspace: string, noteId: string): string {
+  return `ws-${slugifyWorkspace(workspace)}-note-${noteId}`
+}
+
 export function sanitizeSessionId(sessionId: string): string {
   if (sessionId.includes('/') || sessionId.includes('?') || sessionId.includes('#')) {
     throw new Error('sessionId must not contain /, ?, or #')

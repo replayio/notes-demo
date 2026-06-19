@@ -16,8 +16,8 @@ describe('prompt unit tests', () => {
     const prompt = buildAgentSystemPrompt()
 
     expect(prompt).toContain('Electra')
-    expect(prompt).toContain('shared ProseMirror document')
-    expect(prompt).toContain('plain prose suitable for paragraph insertion')
+    expect(prompt).toContain('GitBook-flavored markdown document')
+    expect(prompt).toContain('{% hint style="info" %}')
   })
 
   it('builds chat tool prompts for default and preferred modes', () => {
@@ -33,7 +33,7 @@ describe('prompt unit tests', () => {
     expect(defaultPrompt).toContain('follow up with one short chat sentence describing what you actually changed')
     expect(defaultPrompt).toContain('If a tool call did not change the document, do not claim that it did')
     expect(defaultPrompt).toContain('For formatting existing words or phrases, prefer selecting the exact text and using set_format')
-    expect(defaultPrompt).toContain('you must set contentFormat to markdown on replace_matches or insert_text')
+    expect(defaultPrompt).toContain('any markdown you insert becomes real formatting')
     expect(defaultPrompt).toContain('When the user asks for a new paragraph, second paragraph, closing paragraph')
     expect(defaultPrompt).toContain('call insert_paragraph_break')
     expect(defaultPrompt).toContain('After insert_paragraph_break, prefer insert mode')
@@ -101,15 +101,12 @@ describe('prompt unit tests', () => {
     expect(userPrompt).toContain('completed a continue streaming edit in plain_text (84 chars)')
   })
 
-  it('builds streaming-edit system prompts per content format', () => {
-    const plain = buildStreamingEditSystemPrompt('plain_text')
-    const markdown = buildStreamingEditSystemPrompt('markdown')
+  it('builds the GitBook streaming-edit system prompt', () => {
+    const prompt = buildStreamingEditSystemPrompt('markdown')
 
-    expect(plain).toContain('streamed directly into a shared document')
-    expect(plain).toContain('Output only the exact prose')
-    expect(plain).toContain('plain prose without markdown markers')
-    expect(markdown).toContain('Format the content as markdown')
-    expect(markdown).toContain('Do not wrap the output in markdown code fences')
+    expect(prompt).toContain('streamed directly into a shared GitBook-flavored markdown document')
+    expect(prompt).toContain('Output only the exact document content itself')
+    expect(prompt).toContain('{% tabs %}')
   })
 
   it('builds streaming-edit user prompts with instruction, context, and selection', () => {

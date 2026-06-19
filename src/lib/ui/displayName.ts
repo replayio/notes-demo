@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
+import { COMPANIES } from './companies'
 
 const DISPLAY_NAME_STORAGE_KEY = 'y-llm.display-name'
+const COMPANY_STORAGE_KEY = 'y-llm.company'
 const ADJECTIVES = [
   'Curious',
   'Bright',
@@ -56,4 +58,30 @@ export function useStoredDisplayName(): {
   }, [])
 
   return { displayName, ready, saveDisplayName }
+}
+
+export function useStoredCompany(): {
+  company: string
+  saveCompany: (value: string) => string
+} {
+  const [company, setCompany] = useState(COMPANIES[0]!.name)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const stored = window.localStorage.getItem(COMPANY_STORAGE_KEY)?.trim()
+    const next = stored && COMPANIES.some((c) => c.name === stored) ? stored : COMPANIES[0]!.name
+    window.localStorage.setItem(COMPANY_STORAGE_KEY, next)
+    setCompany(next)
+  }, [])
+
+  const saveCompany = useCallback((value: string) => {
+    const next = COMPANIES.some((c) => c.name === value) ? value : COMPANIES[0]!.name
+    setCompany(next)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COMPANY_STORAGE_KEY, next)
+    }
+    return next
+  }, [])
+
+  return { company, saveCompany }
 }

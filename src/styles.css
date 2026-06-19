@@ -1,4 +1,5 @@
-@import 'prosemirror-view/style/prosemirror.css';
+@import '@brett_lamy/docstream/styles.css';
+@import '@brett_lamy/docstream-editor/styles.css';
 
 :root {
   --bg: #f5f5f4;
@@ -249,14 +250,15 @@ textarea {
 /* ── Document shell ─────────────────────────────────────── */
 
 .doc-shell {
-  height: 100vh;
+  height: 100%;
+  position: relative;
   overflow: hidden;
   padding-top: var(--toolbar-height);
   padding-bottom: var(--statusbar-height);
 }
 
 .doc-toolbar {
-  position: fixed;
+  position: absolute;
   top: 0;
   left: 0;
   right: 0;
@@ -407,6 +409,110 @@ textarea {
 
 .presence-pill--local:hover .presence-pill__edit-icon {
   opacity: 0.7;
+}
+
+/* ── Company picker (login) ─────────────────────────────── */
+
+.company-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.company-picker__avatar {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--border);
+}
+
+.company-picker__name {
+  flex: 1;
+  min-width: 0;
+}
+
+.company-picker__select {
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2378716c' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.625rem center;
+  padding-right: 1.75rem;
+}
+
+/* ── Collaborator avatars on the note (Apple Notes style) ── */
+
+.avatar-stack {
+  position: absolute;
+  top: 0.5rem;
+  right: 1rem;
+  z-index: 5;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.company-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+}
+
+.company-group__label {
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.company-group__avatars {
+  display: flex;
+  flex-direction: row;
+}
+
+.company-group__avatars .avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 2px solid var(--surface);
+  margin-left: -8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  transition: margin 0.1s ease;
+}
+
+.company-group__avatars .avatar:first-child {
+  margin-left: 0;
+}
+
+.company-group:hover .avatar {
+  margin-left: 2px;
+}
+
+.company-group__avatars .avatar:first-child {
+  margin-left: 0;
+}
+
+.company-group__avatars .avatar--local {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* ── Body grid ──────────────────────────────────────────── */
@@ -580,8 +686,15 @@ textarea {
 
 .editor-surface.ProseMirror {
   color: var(--text);
-  font-size: 0.9375rem;
-  line-height: 1.65;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.editor-surface.ProseMirror h1:first-child {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .editor-surface h1,
@@ -1243,7 +1356,7 @@ textarea {
 /* ── Status bar ─────────────────────────────────────────── */
 
 .status-bar {
-  position: fixed;
+  position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
@@ -1342,4 +1455,489 @@ textarea {
     min-height: var(--statusbar-height);
     flex-wrap: wrap;
   }
+}
+
+/* ── Workspace shell (Apple Notes / Mail layout) ────────── */
+
+.workspace-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.workspace-main {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+/* ── Notes sidebar ──────────────────────────────────────── */
+
+.notes-sidebar {
+  width: 272px;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #ececec;
+  border-right: 1px solid var(--border);
+}
+
+.notes-sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--toolbar-height);
+  padding: 0 0.75rem 0 1rem;
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+
+.notes-sidebar__company {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.notes-sidebar__company-avatar {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 0.5625rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.notes-sidebar__title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notes-sidebar__new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 1.05rem;
+  transition: background 0.1s;
+  outline: none;
+}
+
+.notes-sidebar__new[data-hovered] {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.notes-sidebar__new[data-focus-visible] {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.5);
+}
+
+.notes-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  outline: none;
+}
+
+.notes-list__empty {
+  padding: 1.5rem 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.note-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+  color: var(--text);
+  transition: background 0.08s;
+}
+
+.note-item[data-hovered] {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.note-item[data-selected] {
+  background: #ffd35a;
+}
+
+.note-item[data-focus-visible] {
+  box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.5);
+}
+
+.note-item__icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--text-muted);
+  font-size: 1rem;
+}
+
+.note-item[data-selected] .note-item__icon {
+  color: #7a5a00;
+}
+
+.note-item__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.note-item__title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-item__meta {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.note-item[data-selected] .note-item__meta {
+  color: #7a5a00;
+}
+
+.note-item__delete {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+  outline: none;
+}
+
+.note-item[data-hovered] .note-item__delete,
+.note-item[data-selected] .note-item__delete {
+  opacity: 1;
+}
+
+.note-item__delete[data-hovered] {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--danger);
+}
+
+.note-item__delete[data-focus-visible] {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.5);
+  opacity: 1;
+}
+
+/* ── Empty note state ───────────────────────────────────── */
+
+.note-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--surface);
+  padding: 2rem;
+}
+
+.note-empty__icon {
+  width: 48px;
+  height: 48px;
+  opacity: 0.3;
+  margin-bottom: 0.5rem;
+}
+
+.note-empty__title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.note-empty__lead {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.note-empty__btn {
+  margin-top: 0.75rem;
+  height: 34px;
+  padding: 0 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: background 0.1s;
+}
+
+.note-empty__btn[data-hovered] {
+  background: var(--accent-hover);
+}
+
+.note-empty__btn[data-focus-visible] {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4);
+}
+
+@media (max-width: 720px) {
+  .notes-sidebar {
+    width: 200px;
+  }
+}
+
+/* ── Rich / Markdown mode toggle ────────────────────────── */
+
+.mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  margin: 0 0.5rem;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.05);
+  flex-shrink: 0;
+}
+
+.mode-toggle__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.25rem 0.55rem;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.mode-toggle__btn:hover {
+  color: var(--text);
+}
+
+.mode-toggle__btn--active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Editor surfaces (rich = docstream, markdown = CodeMirror) ── */
+
+.editor-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-wrap .gb {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Figma-style floating formatting bar */
+.editor-wrap .gb-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  width: fit-content;
+  margin: 0 0 0.75rem;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+.editor-wrap .gb-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.editor-wrap .gb-tool:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+}
+
+.editor-wrap .gb-tool-active {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent);
+}
+
+.editor-wrap .gb-tool svg {
+  width: 16px;
+  height: 16px;
+}
+
+.editor-wrap .gb-toolbar-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.3rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.editor-wrap .gb-toolbar-hint svg {
+  width: 14px;
+  height: 14px;
+}
+
+.editor-wrap .gb-toolbar-hint kbd {
+  font-family: inherit;
+  font-size: 0.6875rem;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-subtle);
+}
+
+.editor-wrap .gb-content {
+  flex: 1;
+  min-height: 0;
+  padding: 0.5rem 0.25rem 4rem;
+}
+
+/* No box/outline around the editing surface */
+.editor-wrap .gb-content,
+.editor-wrap .gb-content .ProseMirror,
+.editor-wrap .gb-content .tiptap {
+  border: none;
+  outline: none;
+  box-shadow: none;
+}
+
+.editor-wrap .gb-content .ProseMirror:focus,
+.editor-wrap .gb-content .ProseMirror:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ── Slash (/) command palette ──────────────────────────── */
+
+.slash-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 248px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.06);
+  z-index: 60;
+}
+
+.slash-item {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.08s;
+}
+
+.slash-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.slash-item-active {
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--accent);
+}
+
+.slash-item-active svg {
+  color: var(--accent);
+}
+
+.slash-empty {
+  padding: 0.6rem 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.markdown-mode {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+}
+
+.markdown-mode .cm-editor {
+  height: 100%;
+}
+
+.markdown-mode .cm-editor.cm-focused {
+  outline: none;
+}
+
+.markdown-mode .cm-content {
+  padding: 1.25rem 0.5rem 4rem;
 }

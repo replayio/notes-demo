@@ -6,13 +6,14 @@ import {
   docCollaborationDocId,
 } from './streamIds'
 
-/** Shared `Y.XmlFragment` name for the ProseMirror document. */
-export const Y_XML_FRAGMENT_KEY = 'prosemirror'
+/** Shared `Y.Text` name holding the document's GitBook markdown. */
+export const Y_MARKDOWN_KEY = 'markdown'
 
 export interface CreateRoomProviderOptions {
   docKey: string
   localUserName: string
   localUserColor: string
+  localUserCompany?: string
 }
 
 export function applyYjsProviderProxyCompat(
@@ -114,7 +115,7 @@ export function createRoomProvider(options: CreateRoomProviderOptions): {
   ydoc: Y.Doc
   awareness: Awareness
   provider: YjsProvider
-  fragment: Y.XmlFragment
+  text: Y.Text
 } {
   const ydoc = new Y.Doc()
   const awareness = new Awareness(ydoc)
@@ -122,6 +123,7 @@ export function createRoomProvider(options: CreateRoomProviderOptions): {
     user: {
       name: options.localUserName,
       color: options.localUserColor,
+      company: options.localUserCompany,
     },
   })
 
@@ -163,9 +165,9 @@ export function createRoomProvider(options: CreateRoomProviderOptions): {
 
   void provider.connect()
 
-  const fragment = ydoc.getXmlFragment(Y_XML_FRAGMENT_KEY)
+  const text = ydoc.getText(Y_MARKDOWN_KEY)
 
-  return { ydoc, awareness, provider, fragment }
+  return { ydoc, awareness, provider, text }
 }
 
 /** Re-export for routes that need the same stream topology (e.g. chat in milestone 3). */
