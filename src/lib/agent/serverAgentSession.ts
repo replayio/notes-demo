@@ -1,5 +1,5 @@
 import { YjsProvider } from '@durable-streams/y-durable-streams'
-import { Doc, type Text as YText, createRelativePositionFromTypeIndex, relativePositionToJSON } from 'yjs'
+import { Doc, type XmlFragment } from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import {
   durableStreamsYjsBaseUrl,
@@ -8,7 +8,7 @@ import {
   getYjsDurableStreamsOriginServer,
   getYjsDurableStreamsSecretServer,
 } from '../yjs/streamIds'
-import { Y_MARKDOWN_KEY } from '../yjs/createRoomProvider'
+import { Y_FRAGMENT_KEY } from '../yjs/createRoomProvider'
 import type { AgentAwarenessStatus, AgentTransactionOrigin } from './types'
 
 export const AGENT_DISPLAY_NAME = 'Electra'
@@ -44,13 +44,11 @@ export interface ServerAgentSession {
   ydoc: Doc
   awareness: Awareness
   provider: YjsProvider
-  text: YText
+  fragment: XmlFragment
   sessionId: string
   setStatus: (status: AgentAwarenessStatus) => void
   /** Ephemeral composing tail (not yet committed), shown in client overlay. */
   setTail: (tail: string | null) => void
-  /** Broadcast the agent cursor at a string offset in the markdown text. */
-  setCursorFromIndex: (index: number) => void
   clearCursor: () => void
   destroy: () => Promise<void>
 }
@@ -119,7 +117,7 @@ export function createServerAgentSession(docKey: string, sessionId: string): Ser
   })
   void provider.connect()
 
-  const text = ydoc.getText(Y_MARKDOWN_KEY)
+  const fragment = ydoc.getXmlFragment(Y_FRAGMENT_KEY)
 
   const setStatus = (status: AgentAwarenessStatus) => {
     setUserFields(status)
@@ -140,16 +138,6 @@ export function createServerAgentSession(docKey: string, sessionId: string): Ser
       delete nextUser.agentTail
     }
     awareness.setLocalState({ ...prev, user: nextUser })
-  }
-
-  const setCursorFromIndex = (index: number) => {
-    const rel = createRelativePositionFromTypeIndex(text, index)
-    const anchor = relativePositionToJSON(rel)
-    const prev = awareness.getLocalState() ?? {}
-    awareness.setLocalState({
-      ...prev,
-      cursor: { anchor, head: anchor },
-    })
   }
 
   const clearCursor = () => {
@@ -198,11 +186,10 @@ export function createServerAgentSession(docKey: string, sessionId: string): Ser
     ydoc,
     awareness,
     provider,
-    text,
+    fragment,
     sessionId,
     setStatus,
     setTail,
-    setCursorFromIndex,
     clearCursor,
     destroy,
   }

@@ -1,18 +1,21 @@
 import type { YjsProvider } from '@durable-streams/y-durable-streams'
-import { encodeAnchor, decodeAnchor, decodeAnchorBase64, bytesToBase64Str } from './markdownAnchors'
 import {
   createAgentTransactionOrigin,
   createServerAgentSession,
   type ServerAgentSession,
 } from './serverAgentSession'
+import { fragmentToMarkdown, writeMarkdownToFragment } from '../editor/fragmentMarkdown'
 import type { AgentRunMode, AgentTransactionOrigin } from './types'
 import type { EditorContextPayload } from './editorContext'
 
 /**
- * Server-side editing runtime. The document is a single `Y.Text` holding GitBook
- * markdown, so every operation here is a string edit (insert / delete / replace)
- * on that text, with positions anchored as Yjs relative positions so they stay
- * stable across concurrent edits.
+ * Server-side editing runtime. The document's source of truth is a collaborative
+ * `Y.XmlFragment` edited natively by the TipTap editor. The AI thinks in GitBook
+ * markdown, so this runtime reads the fragment as markdown, applies string edits,
+ * and writes the result back through the shared fragment<->markdown bridge.
+ *
+ * Positions are plain string offsets into the markdown (re-derived per call), so
+ * there is no separate anchor type to keep in sync.
  */
 
 function waitForProviderSync(provider: YjsProvider, timeoutMs: number): Promise<void> {
@@ -48,7 +51,6 @@ function preview(text: string, index: number, queryLength: number): { before: st
   }
 }
 
-/** Expand [from,to] to the full lines they touch. */
 function lineBounds(s: string, from: number, to: number): { start: number; end: number } {
   const start = s.lastIndexOf('\n', Math.max(0, from - 1)) + 1
   let end = s.indexOf('\n', to)
@@ -65,8 +67,6 @@ export interface SearchMatchResult {
   text: string
   before: string
   after: string
-  startAnchorB64: string
-  endAnchorB64: string
 }
 
 export type FormatKind = 'mark' | 'block'
@@ -85,7 +85,6 @@ export interface StreamingEditGenerationContext {
   mode: AgentRunMode
   contentFormat: ContentFormat
   documentContext: string
-  /** For rewrite mode: the original selected passage being replaced. */
   selectionText?: string
   signal?: AbortSignal
 }
@@ -114,11 +113,18 @@ export type CompletedDocumentMutation =
       cancelled?: boolean
     }
 
+interface MatchHandle {
+  matchId: string
+  text: string
+  start: number
+  end: number
+}
+
 interface ActiveStreamingEdit {
   id: string
   mode: AgentRunMode
   contentFormat: ContentFormat
-  insertAnchorBytes?: Uint8Array
+  insertOffset: number
   committedChars: number
   deletedSelectionText?: string
 }
@@ -129,12 +135,13 @@ const MARK_DELIMITER: Record<'bold' | 'italic' | 'code', string> = {
   code: '`',
 }
 
+let MATCH_SEQ = 0
+
 export class DocumentToolRuntime {
   private readonly origin: AgentTransactionOrigin
-  private cursorAnchorBytes: Uint8Array | undefined
-  private selectionStartBytes: Uint8Array | undefined
-  private selectionEndBytes: Uint8Array | undefined
-  private readonly matches = new Map<string, SearchMatchResult>()
+  private cursor = 0
+  private selection: { from: number; to: number } | null = null
+  private readonly matches = new Map<string, MatchHandle>()
   private activeEdit: ActiveStreamingEdit | null = null
   private streamingEditGenerator: StreamingEditContentGenerator | undefined
   private readonly completedMutations: CompletedDocumentMutation[] = []
@@ -157,8 +164,7 @@ export class DocumentToolRuntime {
     const runtime = new DocumentToolRuntime(session, input.signal)
     runtime.streamingEditGenerator = input.streamingEditGenerator
     await waitForProviderSync(session.provider, 20_000)
-    runtime.applyEditorContext(input.editorContext)
-    runtime.ensureCursorAtEnd()
+    runtime.cursor = runtime.text().length
     session.setStatus('idle')
     return runtime
   }
@@ -171,66 +177,32 @@ export class DocumentToolRuntime {
   }): DocumentToolRuntime {
     const runtime = new DocumentToolRuntime(input.session, input.signal)
     runtime.streamingEditGenerator = input.streamingEditGenerator
-    runtime.applyEditorContext(input.editorContext)
-    runtime.ensureCursorAtEnd()
+    runtime.cursor = runtime.text().length
     input.session.setStatus('idle')
     return runtime
   }
 
   private throwIfAborted(): void {
-    if (this.signal?.aborted) {
-      throw new DOMException('Agent run aborted', 'AbortError')
-    }
+    if (this.signal?.aborted) throw new DOMException('Agent run aborted', 'AbortError')
   }
 
-  // ── primitive text ops ────────────────────────────────────────────────
+  // ── markdown <-> fragment ───────────────────────────────────────────────
 
   private text(): string {
-    return this.session.text.toString()
+    return fragmentToMarkdown(this.session.fragment)
   }
 
-  private len(): number {
-    return this.session.text.length
+  private write(md: string): void {
+    writeMarkdownToFragment(this.session.ydoc, this.session.fragment, md, this.origin)
   }
 
-  private insertAt(offset: number, str: string): number {
-    if (!str) return offset
-    const at = clamp(offset, 0, this.len())
-    this.session.ydoc.transact(() => {
-      this.session.text.insert(at, str)
-    }, this.origin)
-    return at + str.length
+  private spliceText(from: number, to: number, insert: string): number {
+    const s = this.text()
+    const range = normalizeRange(clamp(from, 0, s.length), clamp(to, 0, s.length))
+    const next = s.slice(0, range.from) + insert + s.slice(range.to)
+    this.write(next)
+    return range.from + insert.length
   }
-
-  private replaceRange(from: number, to: number, str: string): number {
-    const range = normalizeRange(clamp(from, 0, this.len()), clamp(to, 0, this.len()))
-    this.session.ydoc.transact(() => {
-      if (range.to > range.from) this.session.text.delete(range.from, range.to - range.from)
-      if (str) this.session.text.insert(range.from, str)
-    }, this.origin)
-    return range.from + str.length
-  }
-
-  private deleteRange(from: number, to: number): number {
-    const range = normalizeRange(clamp(from, 0, this.len()), clamp(to, 0, this.len()))
-    if (range.to > range.from) {
-      this.session.ydoc.transact(() => {
-        this.session.text.delete(range.from, range.to - range.from)
-      }, this.origin)
-    }
-    return range.from
-  }
-
-  private anchorAt(offset: number): Uint8Array {
-    return encodeAnchor(this.session.text, clamp(offset, 0, this.len()))
-  }
-
-  private resolve(bytes: Uint8Array | undefined): number | null {
-    if (!bytes) return null
-    return decodeAnchor(this.session.ydoc, bytes)
-  }
-
-  // ── cursor / selection ────────────────────────────────────────────────
 
   getCompletedMutations(): ReadonlyArray<CompletedDocumentMutation> {
     return this.completedMutations
@@ -240,57 +212,24 @@ export class DocumentToolRuntime {
     return this.completedMutations.length
   }
 
-  private ensureCursorAtEnd(): void {
-    const current = this.resolve(this.cursorAnchorBytes)
-    if (current !== null) {
-      this.session.setCursorFromIndex(current)
-      return
-    }
-    const end = this.len()
-    this.cursorAnchorBytes = this.anchorAt(end)
-    this.session.setCursorFromIndex(end)
-  }
-
-  private applyEditorContext(editorContext: EditorContextPayload | undefined): void {
-    if (!editorContext) return
-    if (editorContext.kind === 'selection') {
-      const startBytes = decodeAnchorBase64(editorContext.anchor)
-      const endBytes = decodeAnchorBase64(editorContext.head)
-      const start = this.resolve(startBytes)
-      const end = this.resolve(endBytes)
-      if (start === null || end === null) return
-      this.selectionStartBytes = startBytes
-      this.selectionEndBytes = endBytes
-      this.cursorAnchorBytes = endBytes
-      this.session.setCursorFromIndex(Math.max(start, end))
-      return
-    }
-    const cursorBytes = decodeAnchorBase64(editorContext.anchor)
-    const cursorPos = this.resolve(cursorBytes)
-    if (cursorPos === null) return
-    this.clearSelectionInternal()
-    this.cursorAnchorBytes = cursorBytes
-    this.session.setCursorFromIndex(cursorPos)
-  }
-
-  private updateCursor(offset: number): void {
-    this.cursorAnchorBytes = this.anchorAt(offset)
-    this.session.setCursorFromIndex(offset)
-  }
-
   private resolveSelection(): { from: number; to: number } | null {
-    const from = this.resolve(this.selectionStartBytes)
-    const to = this.resolve(this.selectionEndBytes)
-    if (from === null || to === null) return null
-    return normalizeRange(from, to)
+    if (!this.selection) return null
+    const len = this.text().length
+    return normalizeRange(clamp(this.selection.from, 0, len), clamp(this.selection.to, 0, len))
   }
 
-  private clearSelectionInternal(): void {
-    this.selectionStartBytes = undefined
-    this.selectionEndBytes = undefined
+  /** Re-find a stored match in the current text (handles drift from edits). */
+  private resolveMatch(handle: MatchHandle): { from: number; to: number } {
+    const s = this.text()
+    if (s.slice(handle.start, handle.end) === handle.text) {
+      return { from: handle.start, to: handle.end }
+    }
+    const found = s.indexOf(handle.text)
+    if (found < 0) throw new Error(`Match no longer present: ${handle.matchId}`)
+    return { from: found, to: found + handle.text.length }
   }
 
-  // ── reads ─────────────────────────────────────────────────────────────
+  // ── reads ───────────────────────────────────────────────────────────────
 
   getDocumentSnapshot(
     maxChars: number = 6000,
@@ -322,10 +261,8 @@ export class DocumentToolRuntime {
     maxCharsBefore: number = 120,
     maxCharsAfter: number = 120,
   ): { before: string; after: string } | null {
-    this.ensureCursorAtEnd()
-    const pos = this.resolve(this.cursorAnchorBytes)
-    if (pos === null) return null
     const s = this.text()
+    const pos = clamp(this.cursor, 0, s.length)
     return {
       before: s.slice(Math.max(0, pos - maxCharsBefore), pos),
       after: s.slice(pos, Math.min(s.length, pos + maxCharsAfter)),
@@ -341,65 +278,47 @@ export class DocumentToolRuntime {
     while (results.length < maxResults) {
       const found = s.indexOf(trimmed, fromIndex)
       if (found < 0) break
-      const handle: SearchMatchResult = {
-        matchId: crypto.randomUUID(),
-        text: trimmed,
-        ...preview(s, found, trimmed.length),
-        startAnchorB64: bytesToBase64Str(this.anchorAt(found)),
-        endAnchorB64: bytesToBase64Str(this.anchorAt(found + trimmed.length)),
-      }
-      this.matches.set(handle.matchId, handle)
-      results.push(handle)
+      const matchId = `m${++MATCH_SEQ}`
+      this.matches.set(matchId, { matchId, text: trimmed, start: found, end: found + trimmed.length })
+      results.push({ matchId, text: trimmed, ...preview(s, found, trimmed.length) })
       fromIndex = found + Math.max(1, trimmed.length)
     }
     return results
   }
 
-  // ── cursor placement / selection ──────────────────────────────────────
+  // ── cursor / selection ────────────────────────────────────────────────
 
   placeCursor(matchId: string, edge: 'start' | 'end' = 'start'): { ok: true; cursorAnchorB64: string } {
     const handle = this.matches.get(matchId)
     if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
-    const bytes = decodeAnchorBase64(edge === 'start' ? handle.startAnchorB64 : handle.endAnchorB64)
-    const pos = this.resolve(bytes)
-    if (pos === null) throw new Error('Could not resolve cursor target')
-    this.cursorAnchorBytes = bytes
-    this.clearSelectionInternal()
-    this.session.setCursorFromIndex(pos)
-    return { ok: true, cursorAnchorB64: bytesToBase64Str(bytes) }
+    const range = this.resolveMatch(handle)
+    this.cursor = edge === 'start' ? range.from : range.to
+    this.selection = null
+    return { ok: true, cursorAnchorB64: String(this.cursor) }
   }
 
   placeCursorAtDocumentBoundary(
     boundary: 'start' | 'end',
   ): { ok: true; cursorAnchorB64: string; boundary: 'start' | 'end' } {
-    const pos = boundary === 'start' ? 0 : this.len()
-    this.cursorAnchorBytes = this.anchorAt(pos)
-    this.clearSelectionInternal()
-    this.session.setCursorFromIndex(pos)
-    return { ok: true, cursorAnchorB64: bytesToBase64Str(this.cursorAnchorBytes), boundary }
+    this.cursor = boundary === 'start' ? 0 : this.text().length
+    this.selection = null
+    return { ok: true, cursorAnchorB64: String(this.cursor), boundary }
   }
 
   selectText(matchId: string): { ok: true; selectedText: string } {
     const handle = this.matches.get(matchId)
     if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
-    this.selectionStartBytes = decodeAnchorBase64(handle.startAnchorB64)
-    this.selectionEndBytes = decodeAnchorBase64(handle.endAnchorB64)
-    this.cursorAnchorBytes = this.selectionEndBytes
-    const pos = this.resolve(this.selectionEndBytes)
-    if (pos !== null) this.session.setCursorFromIndex(pos)
+    const range = this.resolveMatch(handle)
+    this.selection = range
+    this.cursor = range.to
     return { ok: true, selectedText: handle.text }
   }
 
   selectCurrentBlock(): { ok: true; selectedText: string } {
-    this.ensureCursorAtEnd()
-    const cursorPos = this.resolve(this.cursorAnchorBytes)
-    if (cursorPos === null) throw new Error('Could not resolve cursor position')
     const s = this.text()
-    const { start, end } = lineBounds(s, cursorPos, cursorPos)
-    this.selectionStartBytes = this.anchorAt(start)
-    this.selectionEndBytes = this.anchorAt(end)
-    this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromIndex(end)
+    const { start, end } = lineBounds(s, this.cursor, this.cursor)
+    this.selection = { from: start, to: end }
+    this.cursor = end
     return { ok: true, selectedText: s.slice(start, end) }
   }
 
@@ -412,26 +331,17 @@ export class DocumentToolRuntime {
     const startHandle = this.matches.get(startMatchId)
     const endHandle = this.matches.get(endMatchId)
     if (!startHandle || !endHandle) throw new Error('Unknown matchId in select_between_matches')
-    const startBytes = decodeAnchorBase64(
-      startEdge === 'start' ? startHandle.startAnchorB64 : startHandle.endAnchorB64,
-    )
-    const endBytes = decodeAnchorBase64(
-      endEdge === 'start' ? endHandle.startAnchorB64 : endHandle.endAnchorB64,
-    )
-    const startAbs = this.resolve(startBytes)
-    const endAbs = this.resolve(endBytes)
-    if (startAbs === null || endAbs === null) throw new Error('Could not resolve selection range')
-    const range = normalizeRange(startAbs, endAbs)
-    this.selectionStartBytes = this.anchorAt(range.from)
-    this.selectionEndBytes = this.anchorAt(range.to)
-    this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromIndex(range.to)
+    const startRange = this.resolveMatch(startHandle)
+    const endRange = this.resolveMatch(endHandle)
+    const from = startEdge === 'start' ? startRange.from : startRange.to
+    const to = endEdge === 'start' ? endRange.from : endRange.to
+    this.selection = normalizeRange(from, to)
+    this.cursor = this.selection.to
     return { ok: true }
   }
 
   clearSelection(): { ok: true } {
-    this.clearSelectionInternal()
-    this.ensureCursorAtEnd()
+    this.selection = null
     return { ok: true }
   }
 
@@ -439,13 +349,9 @@ export class DocumentToolRuntime {
 
   insertParagraphBreak(): { ok: true } {
     this.throwIfAborted()
-    this.ensureCursorAtEnd()
-    const pos = this.resolve(this.cursorAnchorBytes)
-    if (pos === null) throw new Error('Could not resolve cursor position')
-    const endPos = this.insertAt(pos, '\n\n')
-    this.clearSelectionInternal()
+    this.cursor = this.spliceText(this.cursor, this.cursor, '\n\n')
+    this.selection = null
     this.completedMutations.push({ kind: 'insert_paragraph_break' })
-    this.updateCursor(endPos)
     return { ok: true }
   }
 
@@ -465,66 +371,47 @@ export class DocumentToolRuntime {
       const delim = MARK_DELIMITER[input.format as 'bold' | 'italic' | 'code']
       if (!delim) throw new Error(`Unsupported mark format: ${input.format}`)
       const inner = s.slice(selection.from, selection.to)
-      const alreadyWrapped = inner.startsWith(delim) && inner.endsWith(delim) && inner.length >= delim.length * 2
-      const shouldRemove = action === 'remove' || (action === 'toggle' && alreadyWrapped)
-      const next = shouldRemove
-        ? inner.slice(delim.length, inner.length - delim.length)
-        : `${delim}${inner}${delim}`
-      const endPos = this.replaceRange(selection.from, selection.to, next)
-      this.selectionStartBytes = this.anchorAt(selection.from)
-      this.selectionEndBytes = this.anchorAt(endPos)
-      this.cursorAnchorBytes = this.selectionEndBytes
-      this.session.setCursorFromIndex(endPos)
-      this.completedMutations.push({ kind: 'set_format', formatKind: input.kind, format: input.format, action })
-      return { ok: true, kind: input.kind, format: input.format, action }
+      const wrapped = inner.startsWith(delim) && inner.endsWith(delim) && inner.length >= delim.length * 2
+      const remove = action === 'remove' || (action === 'toggle' && wrapped)
+      const next = remove ? inner.slice(delim.length, inner.length - delim.length) : `${delim}${inner}${delim}`
+      const end = this.spliceText(selection.from, selection.to, next)
+      this.selection = { from: selection.from, to: end }
+      this.cursor = end
+    } else {
+      const bounds = lineBounds(s, selection.from, selection.to)
+      const lines = s.slice(bounds.start, bounds.end).split('\n')
+      const transformed = lines.map((line, i) => {
+        const bare = stripLeadingBlockMarkers(line)
+        switch (input.format) {
+          case 'paragraph':
+            return bare
+          case 'heading':
+            return `${'#'.repeat(clamp(input.level ?? 2, 1, 6))} ${bare}`
+          case 'bullet_list':
+            return `- ${bare}`
+          case 'ordered_list':
+            return `${i + 1}. ${bare}`
+          default:
+            throw new Error(`Unsupported block format: ${input.format}`)
+        }
+      })
+      const end = this.spliceText(bounds.start, bounds.end, transformed.join('\n'))
+      this.selection = { from: bounds.start, to: end }
+      this.cursor = end
     }
-
-    // Block formatting: rewrite the whole lines the selection touches.
-    const bounds = lineBounds(s, selection.from, selection.to)
-    const block = s.slice(bounds.start, bounds.end)
-    const lines = block.split('\n')
-    const transformed = lines.map((line, i) => {
-      const bare = stripLeadingBlockMarkers(line)
-      switch (input.format) {
-        case 'paragraph':
-          return bare
-        case 'heading':
-          return `${'#'.repeat(clamp(input.level ?? 2, 1, 6))} ${bare}`
-        case 'bullet_list':
-          return `- ${bare}`
-        case 'ordered_list':
-          return `${i + 1}. ${bare}`
-        default:
-          throw new Error(`Unsupported block format: ${input.format}`)
-      }
-    })
-    const next = transformed.join('\n')
-    const endPos = this.replaceRange(bounds.start, bounds.end, next)
-    this.selectionStartBytes = this.anchorAt(bounds.start)
-    this.selectionEndBytes = this.anchorAt(endPos)
-    this.cursorAnchorBytes = this.selectionEndBytes
-    this.session.setCursorFromIndex(endPos)
     this.completedMutations.push({ kind: 'set_format', formatKind: input.kind, format: input.format, action })
     return { ok: true, kind: input.kind, format: input.format, action }
   }
 
-  insertText(
-    text: string,
-    _contentFormat: ContentFormat = 'markdown',
-  ): { ok: true; insertedChars: number } {
+  insertText(text: string, _contentFormat: ContentFormat = 'markdown'): { ok: true; insertedChars: number } {
     this.throwIfAborted()
     const selection = this.resolveSelection()
-    let endPos: number
     if (selection) {
-      endPos = this.replaceRange(selection.from, selection.to, text)
-      this.clearSelectionInternal()
+      this.cursor = this.spliceText(selection.from, selection.to, text)
+      this.selection = null
     } else {
-      this.ensureCursorAtEnd()
-      const pos = this.resolve(this.cursorAnchorBytes)
-      if (pos === null) throw new Error('Could not resolve cursor position')
-      endPos = this.insertAt(pos, text)
+      this.cursor = this.spliceText(this.cursor, this.cursor, text)
     }
-    this.updateCursor(endPos)
     if (text.length > 0) this.completedMutations.push({ kind: 'insert_text', insertedChars: text.length })
     return { ok: true, insertedChars: text.length }
   }
@@ -535,19 +422,15 @@ export class DocumentToolRuntime {
     _contentFormat: ContentFormat = 'markdown',
   ): { ok: true; replacedCount: number; insertedChars: number } {
     this.throwIfAborted()
-    const uniqueMatchIds = Array.from(new Set(matchIds))
-    if (uniqueMatchIds.length === 0) return { ok: true, replacedCount: 0, insertedChars: text.length }
+    const uniqueIds = Array.from(new Set(matchIds))
+    if (uniqueIds.length === 0) return { ok: true, replacedCount: 0, insertedChars: text.length }
 
-    const ranges = uniqueMatchIds.map((matchId) => {
-      const handle = this.matches.get(matchId)
-      if (!handle) throw new Error(`Unknown matchId: ${matchId}`)
-      const start = this.resolve(decodeAnchorBase64(handle.startAnchorB64))
-      const end = this.resolve(decodeAnchorBase64(handle.endAnchorB64))
-      if (start === null || end === null) throw new Error(`Could not resolve matchId: ${matchId}`)
-      return normalizeRange(start, end)
+    // Resolve all ranges against current text, apply right-to-left.
+    const ranges = uniqueIds.map((id) => {
+      const handle = this.matches.get(id)
+      if (!handle) throw new Error(`Unknown matchId: ${id}`)
+      return this.resolveMatch(handle)
     })
-
-    // Apply right-to-left so earlier offsets remain valid.
     ranges.sort((a, b) => (a.from === b.from ? b.to - a.to : b.from - a.from))
     for (let i = 1; i < ranges.length; i += 1) {
       if (ranges[i - 1]!.from < ranges[i]!.to) {
@@ -557,16 +440,11 @@ export class DocumentToolRuntime {
 
     let cursorPos = ranges[ranges.length - 1]!.from
     for (const range of ranges) {
-      cursorPos = this.replaceRange(range.from, range.to, text)
+      cursorPos = this.spliceText(range.from, range.to, text)
     }
-
-    this.clearSelectionInternal()
-    this.updateCursor(cursorPos)
-    this.completedMutations.push({
-      kind: 'replace_matches',
-      replacedCount: ranges.length,
-      insertedChars: text.length,
-    })
+    this.selection = null
+    this.cursor = cursorPos
+    this.completedMutations.push({ kind: 'replace_matches', replacedCount: ranges.length, insertedChars: text.length })
     return { ok: true, replacedCount: ranges.length, insertedChars: text.length }
   }
 
@@ -574,9 +452,8 @@ export class DocumentToolRuntime {
     this.throwIfAborted()
     const selection = this.resolveSelection()
     if (!selection) return { ok: true, deleted: false }
-    const endPos = this.deleteRange(selection.from, selection.to)
-    this.clearSelectionInternal()
-    this.updateCursor(endPos)
+    this.cursor = this.spliceText(selection.from, selection.to, '')
+    this.selection = null
     this.completedMutations.push({ kind: 'delete_selection' })
     return { ok: true, deleted: true }
   }
@@ -596,33 +473,29 @@ export class DocumentToolRuntime {
       const selection = this.resolveSelection()
       if (!selection) throw new Error('Rewrite requires an active selection')
       deletedSelectionText = this.text().slice(selection.from, selection.to)
-      insertOffset = this.deleteRange(selection.from, selection.to)
-      this.clearSelectionInternal()
+      insertOffset = this.spliceText(selection.from, selection.to, '')
+      this.selection = null
     } else if (mode === 'continue') {
-      insertOffset = this.len()
+      insertOffset = this.text().length
     } else {
-      this.ensureCursorAtEnd()
-      const pos = this.resolve(this.cursorAnchorBytes)
-      insertOffset = pos ?? this.len()
-      this.clearSelectionInternal()
+      insertOffset = clamp(this.cursor, 0, this.text().length)
+      this.selection = null
     }
 
     // Separate appended prose from preceding content with a blank line.
     if ((mode === 'continue' || mode === 'insert') && insertOffset > 0) {
       const before = this.text().slice(0, insertOffset)
       if (!before.endsWith('\n\n')) {
-        const sep = before.endsWith('\n') ? '\n' : '\n\n'
-        insertOffset = this.insertAt(insertOffset, sep)
+        insertOffset = this.spliceText(insertOffset, insertOffset, before.endsWith('\n') ? '\n' : '\n\n')
       }
     }
 
-    this.cursorAnchorBytes = this.anchorAt(insertOffset)
-    this.session.setCursorFromIndex(insertOffset)
+    this.cursor = insertOffset
     this.activeEdit = {
-      id: crypto.randomUUID(),
+      id: `edit${++MATCH_SEQ}`,
       mode,
       contentFormat,
-      insertAnchorBytes: this.anchorAt(insertOffset),
+      insertOffset,
       committedChars: 0,
       deletedSelectionText,
     }
@@ -683,27 +556,24 @@ export class DocumentToolRuntime {
     return result
   }
 
-  /** Append a streamed markdown delta into the document at the live insert anchor. */
+  /** Append a streamed markdown delta at the live insert offset. */
   async pushStreamingText(delta: string): Promise<void> {
     this.throwIfAborted()
     const edit = this.activeEdit
     if (!edit || delta.length === 0) return
-    const pos = this.resolve(edit.insertAnchorBytes) ?? this.len()
-    const endPos = this.insertAt(pos, delta)
-    edit.insertAnchorBytes = this.anchorAt(endPos)
+    const end = this.spliceText(edit.insertOffset, edit.insertOffset, delta)
+    edit.insertOffset = end
     edit.committedChars += delta.length
+    this.cursor = end
     this.session.setStatus('composing')
-    this.updateCursor(endPos)
   }
 
   stopStreamingEdit(cancelled: boolean = false): { ok: true; committedChars: number; cancelled?: boolean } {
     const edit = this.activeEdit
     if (!edit) return { ok: true, committedChars: 0, cancelled }
 
-    // On cancel with nothing written, restore a rewrite's original passage.
-    if (cancelled && edit.committedChars === 0 && edit.deletedSelectionText && edit.insertAnchorBytes) {
-      const pos = this.resolve(edit.insertAnchorBytes)
-      if (pos !== null) this.updateCursor(this.insertAt(pos, edit.deletedSelectionText))
+    if (cancelled && edit.committedChars === 0 && edit.deletedSelectionText) {
+      this.cursor = this.spliceText(edit.insertOffset, edit.insertOffset, edit.deletedSelectionText)
     }
 
     const result = {

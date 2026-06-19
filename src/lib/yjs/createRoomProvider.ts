@@ -6,8 +6,12 @@ import {
   docCollaborationDocId,
 } from './streamIds'
 
-/** Shared `Y.Text` name holding the document's GitBook markdown. */
-export const Y_MARKDOWN_KEY = 'markdown'
+/**
+ * Shared `Y.XmlFragment` field for the structured document. This is the source of
+ * truth, edited natively by TipTap's Collaboration extension (and on the server
+ * via y-prosemirror). `'default'` matches TipTap Collaboration's default field.
+ */
+export const Y_FRAGMENT_KEY = 'default'
 
 export interface CreateRoomProviderOptions {
   docKey: string
@@ -115,7 +119,7 @@ export function createRoomProvider(options: CreateRoomProviderOptions): {
   ydoc: Y.Doc
   awareness: Awareness
   provider: YjsProvider
-  text: Y.Text
+  fragment: Y.XmlFragment
 } {
   const ydoc = new Y.Doc()
   const awareness = new Awareness(ydoc)
@@ -165,9 +169,9 @@ export function createRoomProvider(options: CreateRoomProviderOptions): {
 
   void provider.connect()
 
-  const text = ydoc.getText(Y_MARKDOWN_KEY)
+  const fragment = ydoc.getXmlFragment(Y_FRAGMENT_KEY)
 
-  return { ydoc, awareness, provider, text }
+  return { ydoc, awareness, provider, fragment }
 }
 
 /** Re-export for routes that need the same stream topology (e.g. chat in milestone 3). */

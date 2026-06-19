@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import * as Y from 'yjs'
-import type { Awareness } from 'y-protocols/awareness'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { Editor as TiptapEditor } from '@tiptap/react'
+import Collaboration from '@tiptap/extension-collaboration'
+import CollaborationCaret from '@tiptap/extension-collaboration-caret'
 import { GitbookEditor } from '@brett_lamy/docstream-editor'
 import { EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
+import { defaultKeymap } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
-import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next'
 import { createRoomProvider } from '../lib/yjs/createRoomProvider'
+import { fragmentToMarkdown, writeMarkdownToFragment } from '../lib/editor/fragmentMarkdown'
 import { avatarColor } from '../lib/ui/companies'
 import type { EditorConnectionState, EditorMode } from './GitbookCollaborativeEditor'
+
+type Awareness = ReturnType<typeof createRoomProvider>['awareness']
 
 type Props = {
   docKey: string
@@ -20,34 +24,19 @@ type Props = {
   onTitleChange?: (title: string) => void
 }
 
-/** Apply a minimal prefix/suffix diff of `next` against the Y.Text contents. */
-function applyMarkdownDiff(ytext: Y.Text, next: string): void {
-  const prev = ytext.toString()
-  if (prev === next) return
-  const minLen = Math.min(prev.length, next.length)
-  let prefix = 0
-  while (prefix < minLen && prev[prefix] === next[prefix]) prefix++
-  let suffix = 0
-  while (
-    suffix < minLen - prefix &&
-    prev[prev.length - 1 - suffix] === next[next.length - 1 - suffix]
-  ) {
-    suffix++
-  }
-  const deleteCount = prev.length - prefix - suffix
-  const insert = next.slice(prefix, next.length - suffix)
-  ytext.doc?.transact(() => {
-    if (deleteCount > 0) ytext.delete(prefix, deleteCount)
-    if (insert) ytext.insert(prefix, insert)
-  })
-}
+const MARKDOWN_ORIGIN = Symbol('markdown-mode')
 
-function firstNonEmptyLine(md: string): string {
-  for (const line of md.split('\n')) {
-    const trimmed = line.replace(/^#+\s*/, '').trim()
-    if (trimmed) return trimmed.slice(0, 120)
-  }
-  return ''
+function firstTextblockTitle(editor: TiptapEditor): string {
+  let title = ''
+  editor.state.doc.descendants((node: import('@tiptap/pm/model').Node) => {
+    if (title) return false
+    if (node.isTextblock) {
+      title = node.textContent.trim()
+      return false
+    }
+    return true
+  })
+  return title.slice(0, 120)
 }
 
 export default function GitbookEditorClient({
@@ -60,7 +49,15 @@ export default function GitbookEditorClient({
   onTitleChange,
 }: Props) {
   const [room, setRoom] = useState<ReturnType<typeof createRoomProvider> | null>(null)
-  const [md, setMd] = useState('')
+
+  // Keep callbacks in refs so stable effect/handler identities don't re-fire
+  // (a changing onEditorReady would otherwise stack editor 'update' listeners).
+  const onAwarenessRef = useRef(onAwarenessChange)
+  const onConnRef = useRef(onConnectionStateChange)
+  const onTitleRef = useRef(onTitleChange)
+  onAwarenessRef.current = onAwarenessChange
+  onConnRef.current = onConnectionStateChange
+  onTitleRef.current = onTitleChange
 
   useEffect(() => {
     const next = createRoomProvider({
@@ -70,7 +67,6 @@ export default function GitbookEditorClient({
       localUserColor: avatarColor(localUserCompany ?? localUserName),
     })
     setRoom(next)
-    setMd(next.text.toString())
     return () => {
       next.provider.destroy()
       next.awareness.destroy()
@@ -80,31 +76,14 @@ export default function GitbookEditorClient({
   }, [docKey, localUserName, localUserCompany])
 
   useEffect(() => {
-    if (!room) return
-    const sync = () => setMd(room.text.toString())
-    sync()
-    room.text.observe(sync)
-    return () => room.text.unobserve(sync)
+    if (room) onAwarenessRef.current?.(room.awareness, room.awareness.clientID)
+    else onAwarenessRef.current?.(null, 0)
   }, [room])
 
   useEffect(() => {
-    if (room) onAwarenessChange?.(room.awareness, room.awareness.clientID)
-    else onAwarenessChange?.(null, 0)
-  }, [room, onAwarenessChange])
-
-  const titleRef = useRef('')
-  useEffect(() => {
-    const title = firstNonEmptyLine(md)
-    if (title !== titleRef.current) {
-      titleRef.current = title
-      onTitleChange?.(title)
-    }
-  }, [md, onTitleChange])
-
-  useEffect(() => {
-    if (!room || !onConnectionStateChange) return
+    if (!room) return
     const emit = () => {
-      onConnectionStateChange({
+      onConnRef.current?.({
         status: room.provider.connected
           ? 'connected'
           : room.provider.connecting
@@ -123,45 +102,99 @@ export default function GitbookEditorClient({
       room.provider.off('synced', emit)
       room.awareness.off('change', emit)
     }
-  }, [room, onConnectionStateChange])
+  }, [room])
 
-  if (!room) return <p className="status-line">Connecting collaborative room…</p>
+  const extensions = useMemo(() => {
+    if (!room) return null
+    return [
+      Collaboration.configure({ fragment: room.fragment }),
+      CollaborationCaret.configure({
+        provider: { awareness: room.awareness },
+        user: {
+          name: localUserName,
+          color: avatarColor(localUserCompany ?? localUserName),
+          company: localUserCompany,
+        },
+      }),
+    ]
+  }, [room, localUserName, localUserCompany])
+
+  // Stable: attaches a single 'update' listener that syncs the title (deduped).
+  const lastTitleRef = useRef<string | null>(null)
+  const handleEditorReady = useCallback((editor: TiptapEditor | null) => {
+    if (!editor) return
+    const sync = () => {
+      const title = firstTextblockTitle(editor)
+      if (title === lastTitleRef.current) return
+      lastTitleRef.current = title
+      onTitleRef.current?.(title)
+    }
+    queueMicrotask(sync)
+    editor.on('update', sync)
+  }, [])
+
+  if (!room || !extensions) return <p className="status-line">Connecting collaborative room…</p>
 
   return (
     <div className="editor-wrap">
       {mode === 'markdown' ? (
         <MarkdownMode room={room} />
       ) : (
-        <GitbookEditor markdown={md} onChange={(next) => applyMarkdownDiff(room.text, next)} />
+        <GitbookEditor extensions={extensions} disableHistory onEditorReady={handleEditorReady} />
       )}
     </div>
   )
 }
 
-/** Raw GitBook markdown editing via CodeMirror bound to the same Y.Text. */
+/**
+ * Raw GitBook markdown editing. Loads the current fragment as markdown and writes
+ * edits back into the shared fragment. A focused source-editing surface (not a
+ * live char-CRDT like the rich view).
+ */
 function MarkdownMode({ room }: { room: ReturnType<typeof createRoomProvider> }) {
   const hostRef = useRef<HTMLDivElement>(null)
-  const undoManager = useMemo(() => new Y.UndoManager(room.text), [room])
 
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let pending: string | null = null
+
+    const flush = () => {
+      if (pending === null) return
+      const md = pending
+      pending = null
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      writeMarkdownToFragment(room.ydoc, room.fragment, md, MARKDOWN_ORIGIN)
+    }
+
     const view = new EditorView({
       parent: host,
       state: EditorState.create({
-        doc: room.text.toString(),
+        doc: fragmentToMarkdown(room.fragment),
         extensions: [
           lineNumbers(),
           EditorView.lineWrapping,
           markdown(),
-          keymap.of(yUndoManagerKeymap),
-          yCollab(room.text, room.awareness, { undoManager }),
+          keymap.of(defaultKeymap),
+          EditorView.updateListener.of((u) => {
+            if (!u.docChanged) return
+            pending = u.state.doc.toString()
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(flush, 300)
+          }),
         ],
       }),
     })
     view.focus()
-    return () => view.destroy()
-  }, [room, undoManager])
+    return () => {
+      flush()
+      view.destroy()
+    }
+  }, [room])
 
   return <div ref={hostRef} className="markdown-mode" />
 }

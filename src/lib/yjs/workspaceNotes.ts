@@ -121,6 +121,9 @@ export function useWorkspaceNotes(workspace: string): {
         const arr = room.notes.toArray()
         for (let i = 0; i < arr.length; i++) {
           if (arr[i]!.get('id') === id) {
+            // Skip no-op writes — title sync fires on every edit, and rewriting
+            // an unchanged title would spam the index doc.
+            if (arr[i]!.get('title') === title) break
             arr[i]!.set('title', title)
             arr[i]!.set('updatedAt', Date.now())
             break
