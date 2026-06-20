@@ -96,6 +96,18 @@ importers:
       nitro:
         specifier: npm:nitro-nightly@latest
         version: nitro-nightly@3.0.1-20260329-223454-55f30f48(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(miniflare@4.20260329.0)(rollup@4.60.1)(vite@7.3.1(@types/node@22.19.15)(tsx@4.21.0)(yaml@2.9.0))
+      prosemirror-model:
+        specifier: 1.25.9
+        version: 1.25.9
+      prosemirror-state:
+        specifier: 1.4.4
+        version: 1.4.4
+      prosemirror-transform:
+        specifier: 1.12.0
+        version: 1.12.0
+      prosemirror-view:
+        specifier: 1.41.9
+        version: 1.41.9
       react:
         specifier: ^18.3.1
         version: 18.3.1
