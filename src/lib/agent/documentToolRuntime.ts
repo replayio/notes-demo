@@ -148,6 +148,9 @@ const MARK_DELIMITER: Record<'bold' | 'italic' | 'code', string> = {
 
 let MATCH_SEQ = 0
 
+// Coalesce streamed writes to this cadence (ms) instead of writing per token.
+const STREAM_FLUSH_MS = 120
+
 export class DocumentToolRuntime {
   private readonly origin: AgentTransactionOrigin
   private cursor = 0
@@ -553,11 +556,22 @@ export class DocumentToolRuntime {
         ...(edit.deletedSelectionText ? { selectionText: edit.deletedSelectionText } : {}),
         signal: this.signal,
       })
+      // Throttle document writes to a steady cadence instead of per-token. Each
+      // write rewrites the whole fragment and republishes the agent cursor; doing
+      // that per-token churns Yjs items and races the cursor (awareness) ahead of
+      // the doc update, so the caret/edits render inconsistently. Coalescing gives
+      // the doc + cursor time to sync together.
+      let lastFlush = 0
       for await (const delta of stream) {
         this.throwIfAborted()
         if (delta.length === 0) continue
-        await this.pushStreamingText(delta)
+        edit.buffer += delta
         emitter.delta({ messageId, delta })
+        const now = Date.now()
+        if (now - lastFlush >= STREAM_FLUSH_MS) {
+          lastFlush = now
+          this.flushStreamingEdit()
+        }
       }
     } catch (error) {
       const cancelled = error instanceof DOMException && error.name === 'AbortError'
@@ -576,17 +590,26 @@ export class DocumentToolRuntime {
   }
 
   /**
-   * Accumulate the streamed markdown and re-render the whole document as
-   * `before + buffer + after`. Rebuilding from stable segments (instead of
-   * splicing into the re-serialized fragment with a numeric offset) keeps the
-   * AI's raw markdown intact, so tables/code/blocks parse correctly once
-   * complete and characters never drift.
+   * Accumulate a streamed markdown delta and flush immediately. Used by tests and
+   * manual callers; the server drive loop accumulates and flushes on a throttle.
    */
   async pushStreamingText(delta: string): Promise<void> {
     this.throwIfAborted()
     const edit = this.activeEdit
     if (!edit || delta.length === 0) return
     edit.buffer += delta
+    this.flushStreamingEdit()
+  }
+
+  /**
+   * Re-render the whole document as `before + buffer + after` and republish the
+   * agent caret. Rebuilding from stable segments (not splicing into the
+   * re-serialized fragment) keeps the AI's raw markdown intact so tables/code
+   * parse correctly once complete and characters never drift.
+   */
+  private flushStreamingEdit(): void {
+    const edit = this.activeEdit
+    if (!edit) return
     this.write(edit.before + edit.buffer + edit.after)
     edit.committedChars = edit.buffer.length
     this.cursor = edit.before.length + edit.buffer.length
@@ -617,9 +640,11 @@ export class DocumentToolRuntime {
     if (cancelled) {
       // Revert to the document as it was before the edit started.
       this.write(edit.originalText)
-    } else if (edit.committedChars > 0) {
-      // Final consistent render of the completed markdown.
+    } else {
+      // Always write the final, complete markdown (throttling may have skipped
+      // the last delta's flush).
       this.write(edit.before + edit.buffer + edit.after)
+      edit.committedChars = edit.buffer.length
     }
 
     const result = {
