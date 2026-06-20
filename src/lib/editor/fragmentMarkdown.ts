@@ -1,5 +1,7 @@
 import * as Y from 'yjs'
-import { initProseMirrorDoc, updateYFragment } from 'y-prosemirror'
+// Use the EDITOR's exact Yjs binding (TipTap collaboration uses @tiptap/y-tiptap)
+// so document ops and agent cursors encode/decode identically to the live editor.
+import { initProseMirrorDoc, updateYFragment } from '@tiptap/y-tiptap'
 import {
   astToTiptap,
   getGitbookSchema,
@@ -37,4 +39,18 @@ export function writeMarkdownToFragment(
   ydoc.transact(() => {
     updateYFragment(ydoc, fragment, newDoc, meta as never)
   }, origin)
+}
+
+/** ProseMirror doc + y-prosemirror mapping for the current fragment. */
+export function fragmentMapping(fragment: Y.XmlFragment): {
+  doc: ReturnType<typeof initProseMirrorDoc>['doc']
+  mapping: unknown
+} {
+  const { doc, meta } = initProseMirrorDoc(fragment, gitbookSchema)
+  return { doc, mapping: meta.mapping }
+}
+
+/** ProseMirror end position of a markdown prefix — used to place the agent caret. */
+export function pmSizeForMarkdown(markdown: string): number {
+  return gitbookSchema.nodeFromJSON(astToTiptap(parseMarkdown(markdown))).content.size
 }

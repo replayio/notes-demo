@@ -4,7 +4,12 @@ import {
   createServerAgentSession,
   type ServerAgentSession,
 } from './serverAgentSession'
-import { fragmentToMarkdown, writeMarkdownToFragment } from '../editor/fragmentMarkdown'
+import {
+  fragmentToMarkdown,
+  writeMarkdownToFragment,
+  fragmentMapping,
+  pmSizeForMarkdown,
+} from '../editor/fragmentMarkdown'
 import type { AgentRunMode, AgentTransactionOrigin } from './types'
 import type { EditorContextPayload } from './editorContext'
 
@@ -514,6 +519,7 @@ export class DocumentToolRuntime {
     }
     this.session.setStatus('thinking')
     this.session.setTail(null)
+    this.broadcastCursorAtMarkdownPrefix(before)
     return { ok: true, editSessionId: this.activeEdit.id, mode, contentFormat }
   }
 
@@ -585,6 +591,23 @@ export class DocumentToolRuntime {
     edit.committedChars = edit.buffer.length
     this.cursor = edit.before.length + edit.buffer.length
     this.session.setStatus('composing')
+    this.broadcastCursorAtMarkdownPrefix(edit.before + edit.buffer)
+  }
+
+  /** Place the agent caret at the ProseMirror position matching a markdown prefix. */
+  private broadcastCursorAtMarkdownPrefix(prefix: string): void {
+    try {
+      const { doc, mapping } = fragmentMapping(this.session.fragment)
+      // Target just INSIDE the content (content.size - 1), not the very end:
+      // a position exactly at content.size yields a rootless relative position
+      // that resolves to null on the client, so no caret renders. One before the
+      // boundary lands inside the last text node → a concrete, resolvable anchor.
+      const maxPos = Math.max(0, doc.content.size - 1)
+      const pmPos = Math.max(0, Math.min(pmSizeForMarkdown(prefix), maxPos))
+      this.session.setCursorAt(pmPos, mapping)
+    } catch {
+      // Best-effort: a missing caret shouldn't break the edit.
+    }
   }
 
   stopStreamingEdit(cancelled: boolean = false): { ok: true; committedChars: number; cancelled?: boolean } {
@@ -616,6 +639,7 @@ export class DocumentToolRuntime {
     this.activeEdit = null
     this.session.setTail(null)
     this.session.setStatus('idle')
+    this.session.clearCursor()
     return result
   }
 

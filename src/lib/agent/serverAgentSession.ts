@@ -1,5 +1,6 @@
 import { YjsProvider } from '@durable-streams/y-durable-streams'
-import { Doc, type XmlFragment } from 'yjs'
+import { Doc, type XmlFragment, relativePositionToJSON } from 'yjs'
+import { absolutePositionToRelativePosition } from '@tiptap/y-tiptap'
 import { Awareness } from 'y-protocols/awareness'
 import {
   durableStreamsYjsBaseUrl,
@@ -49,6 +50,8 @@ export interface ServerAgentSession {
   setStatus: (status: AgentAwarenessStatus) => void
   /** Ephemeral composing tail (not yet committed), shown in client overlay. */
   setTail: (tail: string | null) => void
+  /** Broadcast the agent caret at a ProseMirror position (rendered by TipTap CollaborationCaret). */
+  setCursorAt: (pmPos: number, mapping: unknown) => void
   clearCursor: () => void
   destroy: () => Promise<void>
 }
@@ -140,6 +143,17 @@ export function createServerAgentSession(docKey: string, sessionId: string): Ser
     awareness.setLocalState({ ...prev, user: nextUser })
   }
 
+  const setCursorAt = (pmPos: number, mapping: unknown) => {
+    try {
+      const rel = absolutePositionToRelativePosition(pmPos, fragment, mapping as never)
+      const anchor = relativePositionToJSON(rel)
+      const prev = awareness.getLocalState() ?? {}
+      awareness.setLocalState({ ...prev, cursor: { anchor, head: anchor } })
+    } catch (error) {
+      console.warn(logPrefix, 'failed to set agent cursor', error)
+    }
+  }
+
   const clearCursor = () => {
     const prev = awareness.getLocalState() ?? {}
     if ('cursor' in prev) {
@@ -190,6 +204,7 @@ export function createServerAgentSession(docKey: string, sessionId: string): Ser
     sessionId,
     setStatus,
     setTail,
+    setCursorAt,
     clearCursor,
     destroy,
   }

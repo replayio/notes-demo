@@ -56,6 +56,7 @@
     "@tiptap/react": "^3.27.1",
     "@tiptap/starter-kit": "^3.27.1",
     "@tiptap/suggestion": "^3.27.1",
+    "@tiptap/y-tiptap": "^3.0.5",
     "codemirror": "^6.0.2",
     "lucide-react": "^1.21.0",
     "nitro": "npm:nitro-nightly@latest",
