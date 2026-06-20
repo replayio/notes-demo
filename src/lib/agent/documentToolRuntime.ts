@@ -124,7 +124,13 @@ interface ActiveStreamingEdit {
   id: string
   mode: AgentRunMode
   contentFormat: ContentFormat
-  insertOffset: number
+  // Stable segments captured once at start; we rebuild the whole markdown as
+  // `before + buffer + after` on each delta rather than splicing into the
+  // re-serialized fragment text (which drifts and mangles partial markdown).
+  before: string
+  after: string
+  buffer: string
+  originalText: string
   committedChars: number
   deletedSelectionText?: string
 }
@@ -466,36 +472,43 @@ export class DocumentToolRuntime {
   ): { ok: true; editSessionId: string; mode: AgentRunMode; contentFormat: ContentFormat } {
     this.throwIfAborted()
     if (this.activeEdit) throw new Error('A streaming edit is already active')
-    let insertOffset: number
+
+    const originalText = this.text()
+    let before: string
+    let after: string
     let deletedSelectionText: string | undefined
 
     if (mode === 'rewrite') {
       const selection = this.resolveSelection()
       if (!selection) throw new Error('Rewrite requires an active selection')
-      deletedSelectionText = this.text().slice(selection.from, selection.to)
-      insertOffset = this.spliceText(selection.from, selection.to, '')
+      before = originalText.slice(0, selection.from)
+      after = originalText.slice(selection.to)
+      deletedSelectionText = originalText.slice(selection.from, selection.to)
       this.selection = null
     } else if (mode === 'continue') {
-      insertOffset = this.text().length
+      before = originalText
+      after = ''
     } else {
-      insertOffset = clamp(this.cursor, 0, this.text().length)
+      const at = clamp(this.cursor, 0, originalText.length)
+      before = originalText.slice(0, at)
+      after = originalText.slice(at)
       this.selection = null
     }
 
-    // Separate appended prose from preceding content with a blank line.
-    if ((mode === 'continue' || mode === 'insert') && insertOffset > 0) {
-      const before = this.text().slice(0, insertOffset)
-      if (!before.endsWith('\n\n')) {
-        insertOffset = this.spliceText(insertOffset, insertOffset, before.endsWith('\n') ? '\n' : '\n\n')
-      }
+    // Separate appended/inserted prose from preceding content with a blank line
+    // so block markers (headings, {% ... %}, tables) start on their own line.
+    if ((mode === 'continue' || mode === 'insert') && before.length > 0 && !before.endsWith('\n\n')) {
+      before += before.endsWith('\n') ? '\n' : '\n\n'
     }
 
-    this.cursor = insertOffset
     this.activeEdit = {
       id: `edit${++MATCH_SEQ}`,
       mode,
       contentFormat,
-      insertOffset,
+      before,
+      after,
+      buffer: '',
+      originalText,
       committedChars: 0,
       deletedSelectionText,
     }
@@ -556,15 +569,21 @@ export class DocumentToolRuntime {
     return result
   }
 
-  /** Append a streamed markdown delta at the live insert offset. */
+  /**
+   * Accumulate the streamed markdown and re-render the whole document as
+   * `before + buffer + after`. Rebuilding from stable segments (instead of
+   * splicing into the re-serialized fragment with a numeric offset) keeps the
+   * AI's raw markdown intact, so tables/code/blocks parse correctly once
+   * complete and characters never drift.
+   */
   async pushStreamingText(delta: string): Promise<void> {
     this.throwIfAborted()
     const edit = this.activeEdit
     if (!edit || delta.length === 0) return
-    const end = this.spliceText(edit.insertOffset, edit.insertOffset, delta)
-    edit.insertOffset = end
-    edit.committedChars += delta.length
-    this.cursor = end
+    edit.buffer += delta
+    this.write(edit.before + edit.buffer + edit.after)
+    edit.committedChars = edit.buffer.length
+    this.cursor = edit.before.length + edit.buffer.length
     this.session.setStatus('composing')
   }
 
@@ -572,8 +591,12 @@ export class DocumentToolRuntime {
     const edit = this.activeEdit
     if (!edit) return { ok: true, committedChars: 0, cancelled }
 
-    if (cancelled && edit.committedChars === 0 && edit.deletedSelectionText) {
-      this.cursor = this.spliceText(edit.insertOffset, edit.insertOffset, edit.deletedSelectionText)
+    if (cancelled) {
+      // Revert to the document as it was before the edit started.
+      this.write(edit.originalText)
+    } else if (edit.committedChars > 0) {
+      // Final consistent render of the completed markdown.
+      this.write(edit.before + edit.buffer + edit.after)
     }
 
     const result = {

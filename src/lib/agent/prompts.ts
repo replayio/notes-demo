@@ -7,18 +7,19 @@ import type { EditorContextPayload } from './editorContext'
  * renderer understands, so generated content maps to rich blocks.
  */
 export const GITBOOK_FORMAT_GUIDE = [
-  'The document is GitBook-flavored markdown. Use these formats:',
+  'The document is GitBook-flavored markdown. Block constructs MUST each be on their own line with a blank line before and after; every {% ... %} tag and its matching {% end... %} go on their own lines (never inline inside a paragraph).',
+  'Formats:',
   '- Headings with #, ##, ###; bold **text**, italic *text*, strikethrough ~~text~~, inline code `code`, links [label](url).',
   '- Bullet lists with "- ", ordered lists with "1. ", task lists with "- [ ] " and "- [x] ".',
   '- Blockquotes with "> ". Horizontal rule with "---".',
-  '- Fenced code blocks: ```lang\\ncode\\n``` (include a language).',
-  '- Tables with standard | header | rows |.',
+  '- Fenced code blocks: open with ```lang on its own line, code lines, then ``` on its own line.',
+  '- Tables: header row "| A | B |", then a separator row "| --- | --- |", then each data row on its own line.',
   '- Callouts: {% hint style="info" %} ... {% endhint %} (style: info, warning, success, danger).',
-  '- Tabs: {% tabs %}{% tab title="A" %} ... {% endtab %}{% endtabs %}.',
-  '- Expandable: {% expandable %} ... {% endexpandable %}.',
-  '- Steppers: {% stepper %}{% step %} ... {% endstep %}{% endstepper %}.',
-  '- Columns: {% columns %}{% column %} ... {% endcolumn %}{% endcolumns %}.',
-  '- Math blocks: $$ formula $$. Embeds: {% embed url="..." %}.',
+  '- Tabs: {% tabs %} then {% tab title="A" %} ... {% endtab %} per tab, then {% endtabs %}.',
+  '- Expandable/collapsible: use HTML <details> — a line "<details>", blank line, "<summary>Title</summary>", blank line, the content, blank line, "</details>".',
+  '- Steppers: {% stepper %} then {% step %} ... {% endstep %} per step, then {% endstepper %}.',
+  '- Columns: {% columns %} then {% column %} ... {% endcolumn %} per column, then {% endcolumns %}.',
+  '- Math blocks: $$ on its own line, formula, $$ on its own line. Embeds: {% embed url="..." %}.',
 ].join('\n')
 
 export function buildAgentSystemPrompt(): string {
